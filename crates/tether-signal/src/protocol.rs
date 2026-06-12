@@ -64,3 +64,48 @@ pub enum ErrorCode {
     Replaced,
     BadMessage,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// JSON shapes pinned against controller/src/signaling.test.ts.
+    /// Change both or neither.
+    #[test]
+    fn cross_implementation_json_vectors() {
+        let register: ClientMessage = serde_json::from_str(
+            r#"{"type":"register","device_id":"ipad","name":"iPad","caps":{"can_host":false,"can_control":true},"auth":"s3cret"}"#,
+        )
+        .unwrap();
+        match register {
+            ClientMessage::Register { device_id, caps, auth, .. } => {
+                assert_eq!(device_id, "ipad");
+                assert!(!caps.can_host);
+                assert!(caps.can_control);
+                assert_eq!(auth, "s3cret");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::Registered).unwrap(),
+            r#"{"type":"registered"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::Answer {
+                from: "mac".into(),
+                sdp: "v=0...".into()
+            })
+            .unwrap(),
+            r#"{"type":"answer","from":"mac","sdp":"v=0..."}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ServerMessage::Error {
+                code: ErrorCode::BadAuth,
+                message: "bad secret".into()
+            })
+            .unwrap(),
+            r#"{"type":"error","code":"bad_auth","message":"bad secret"}"#
+        );
+    }
+}

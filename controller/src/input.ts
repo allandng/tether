@@ -1,9 +1,14 @@
 // Capture pointer/wheel/keyboard events over the viewport and forward them
 // as protocol InputEvents with normalized coordinates.
 
-import type { TetherConnection } from "./connection";
-import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT } from "./protocol";
+import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, type InputEvent } from "./protocol";
 import type { Viewer } from "./viewer";
+
+/** Anything input events can be sent through (a transport, or a facade over
+ * whichever transport is currently active). */
+export interface InputSink {
+  sendInput(ev: InputEvent): void;
+}
 
 export interface NormalizedPoint {
   x: number;
@@ -48,7 +53,7 @@ export function wheelToPixels(delta: number, deltaMode: number): number {
   return clampI16(delta * scale);
 }
 
-export function attachInput(canvas: HTMLCanvasElement, viewer: Viewer, connection: TetherConnection): void {
+export function attachInput(canvas: HTMLCanvasElement, viewer: Viewer, connection: InputSink): void {
   const point = (e: { clientX: number; clientY: number }) =>
     normalizedFromClient(e.clientX, e.clientY, viewer.displayedRect());
 

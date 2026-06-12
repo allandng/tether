@@ -36,6 +36,10 @@
       #dot.closed { background: #555; }
       #dot.connecting { background: #e6a700; }
       #dot.connected { background: #2ecc71; }
+      #mode,
+      #signal,
+      #secret,
+      #target,
       #host {
         background: #2a2a2d;
         border: 1px solid #3a3a3d;
@@ -53,6 +57,20 @@
         padding: 6px 14px;
         font: inherit;
         cursor: pointer;
+      }
+      #signal,
+      #secret,
+      #target {
+        width: 150px;
+      }
+      #lan-fields,
+      #rtc-fields {
+        display: inline-flex;
+        gap: 8px;
+      }
+      #lan-fields[hidden],
+      #rtc-fields[hidden] {
+        display: none;
       }
       #stats {
         margin-left: auto;

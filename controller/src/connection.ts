@@ -1,16 +1,8 @@
-// WebSocket connection to tetherd with the Hello handshake.
+// LAN WebSocket transport (Phase 1 path, kept as a fallback transport).
+// Protocol logic lives in ProtocolSession; this file only owns the socket.
 
-import {
-  CAP_CAN_CONTROL,
-  type FrameData,
-  type InputEvent,
-  type Resolution,
-  PROTOCOL_VERSION,
-  Role,
-  decodeMessage,
-  encodeHello,
-  encodeInputEvent,
-} from "./protocol";
+import type { FrameData, InputEvent, Resolution } from "./protocol";
+import { ProtocolSession } from "./session";
 
 export type ConnectionStatus = "connecting" | "connected" | "closed";
 
@@ -20,15 +12,21 @@ export interface ConnectionEvents {
   onFrame(frame: FrameData): void;
 }
 
-export class TetherConnection {
+/** Common shape of all transports (WS today, WebRTC in webrtc.ts). */
+export interface Transport {
+  close(): void;
+  sendInput(ev: InputEvent): void;
+  readonly connected: boolean;
+}
+
+export class TetherConnection implements Transport {
   private ws: WebSocket | null = null;
-  private handshaken = false;
+  private session: ProtocolSession | null = null;
 
   constructor(private readonly events: ConnectionEvents) {}
 
   connect(hostPort: string): void {
     this.close();
-    this.handshaken = false;
     this.events.onStatus("connecting");
 
     let ws: WebSocket;
@@ -41,74 +39,43 @@ export class TetherConnection {
     this.ws = ws;
     ws.binaryType = "arraybuffer";
 
-    ws.onopen = () => {
-      ws.send(
-        encodeHello({
-          version: PROTOCOL_VERSION,
-          role: Role.Controller,
-          capabilities: CAP_CAN_CONTROL,
-        }),
-      );
-    };
+    const session = new ProtocolSession(
+      {
+        onConnected: () => this.events.onStatus("connected"),
+        onResolution: (r) => this.events.onResolution(r),
+        onFrame: (f) => this.events.onFrame(f),
+        onProtocolError: (detail) => this.fail(detail),
+      },
+      (bytes) => {
+        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(bytes);
+      },
+    );
+    this.session = session;
 
+    ws.onopen = () => session.start();
     ws.onmessage = (event: MessageEvent) => {
-      if (!(event.data instanceof ArrayBuffer)) return;
-      const result = decodeMessage(event.data);
-      if (!result.ok) {
-        if (result.reason === "unknown-type") return; // forward compat: skip
-        console.warn("dropping corrupt message:", result.detail);
-        return;
-      }
-      const message = result.message;
-      if (!this.handshaken) {
-        if (message.type !== "hello") {
-          this.fail("protocol error: expected Hello first");
-          return;
-        }
-        if (message.version !== PROTOCOL_VERSION || message.role !== Role.Host) {
-          this.fail(`incompatible host (version ${message.version})`);
-          return;
-        }
-        this.handshaken = true;
-        this.events.onStatus("connected");
-        return;
-      }
-      switch (message.type) {
-        case "resolution":
-          this.events.onResolution(message);
-          break;
-        case "frame":
-          this.events.onFrame(message);
-          break;
-        default:
-          console.warn("unexpected message from host:", message.type);
-      }
+      if (event.data instanceof ArrayBuffer) session.onMessage(event.data);
     };
-
     ws.onclose = () => {
       if (this.ws === ws) {
         this.ws = null;
         this.events.onStatus("closed");
       }
     };
-    ws.onerror = () => {
-      // onclose always follows; nothing useful in the error event itself
-    };
   }
 
   get connected(): boolean {
-    return this.handshaken && this.ws?.readyState === WebSocket.OPEN;
+    return (this.session?.connected ?? false) && this.ws?.readyState === WebSocket.OPEN;
   }
 
   sendInput(ev: InputEvent): void {
-    if (this.connected) {
-      this.ws!.send(encodeInputEvent(ev));
-    }
+    this.session?.sendInput(ev);
   }
 
   close(): void {
     const ws = this.ws;
     this.ws = null;
+    this.session = null;
     if (ws) {
       ws.onclose = null;
       ws.close();
