@@ -16,3 +16,15 @@ each got the simplest choice that doesn't block Phase 2.
 | **Clock-skew latency display** | Frame-age readout in the controller status bar is only meaningful when host and controller clocks agree (same machine / NTP-synced LAN). Hidden when implausible. Gate latency criterion is subjective anyway. | Phase 2 can add an RTT echo message. |
 | **Capture during display sleep / resolution change** | Resolution changes are re-announced mid-session (pipeline detects dimension change per frame). Display sleep/hot-plug behavior unverified. | Phase 5 hardening. |
 | **WS connection over HTTPS pages** | Controller is served over plain HTTP in Phase 1 (`ws://` from `http://` is fine; `wss://` would need TLS on tetherd). | Phase 2 (WebRTC removes the need). |
+
+## Phase 2 additions
+
+| Decision | Phase 2 choice | Revisit when |
+|---|---|---|
+| **Same-secret takeover** | A new offer replaces the active peer session, so a reconnecting controller gets in instantly instead of waiting out ICE timers. Within one shared secret, any device can therefore take over a session. | Real pairing/auth (per-device identity) — Phase 5 hardening. |
+| **TURN relay** | STUN only; symmetric-NAT pairs fail to connect with a "peer connection failed" status. | Phase 5 (self-hosted coturn + credentials via the signal server). |
+| **Codec negotiation** | Host-side `--codec` flag; the controller is not consulted. A controller without WebCodecs gets a black canvas in h264 mode. | Add a capability bit in `Hello` (e.g. `0b100 = h264-decode`) and per-session encoder choice — needs per-session pipelines first. |
+| **Per-codec channel modes** | Media channel is reliable+ordered for both codecs (H.264 requires it). JPEG could ride lossy/unordered for better worst-case latency. | Phase 5, together with adaptive bitrate. |
+| **Signaling TLS** | Plain `ws://` to the signal server (LAN/tunnel assumption). DTLS protects media regardless; signaling metadata and the secret are cleartext on the wire. | Before any internet-exposed signal server: `wss://` via a reverse proxy. |
+| **Encoded-frame drops under extreme backpressure** | The pipeline's watch channel can skip encoded H.264 frames if a consumer stalls outright; the 2 s keyframe interval self-heals visible corruption. Proper fix is per-session lossless queues with pre-encoder backpressure. | Phase 5 (multi-consumer pipelines). |
+| **Signaling error UX** | A bad secret surfaces as a retry loop with a generic "signaling closed" status rather than a clear "wrong secret" message. | First UI polish pass. |

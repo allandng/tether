@@ -125,6 +125,23 @@ the modifier key down for as long as the controller does.
 **modifiers** bitmask (informational; redundant with modifier key events):
 bit 0 shift, bit 1 ctrl, bit 2 alt/option, bit 3 meta/cmd.
 
+## WebRTC transport mapping (Phase 2)
+
+Two data channels, both carrying the wire format above unchanged:
+
+- **`tether-ctl`** (reliable, ordered): `Hello`, `Resolution`, `InputEvent`.
+- **`tether-media`** (reliable, ordered): `FrameData` only, split into chunks
+  because browsers cap data-channel message sizes. Each chunk is
+  `[u32 LE frame_seq][u16 LE chunk_idx][u16 LE chunk_count]` followed by a
+  slice of the complete wire message; payload ≤ 64 KiB − 8. Reassembly is
+  latest-wins. The chunk header is transport framing, not part of the tether
+  protocol (reference impls: `controller/src/chunks.ts`,
+  `crates/tetherd/src/webrtc.rs`).
+
+H.264 `FrameData` payloads are Annex B access units (4-byte start codes,
+SPS/PPS in-band on keyframes); each payload is one complete, independently
+parseable access unit, and keyframes recur every ~2 s.
+
 ## Reference implementations
 
 - Rust: `crates/tether-protocol` (canonical)

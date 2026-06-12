@@ -10,9 +10,36 @@ host from a browser-based controller over a trusted LAN.
 - `controller/` — browser-based viewer/controller (TypeScript + Vite)
 - `docs/` — plan, protocol spec, deferred decisions
 
-## Running (Phase 1, trusted LAN only)
+## Running
+
+Two transports; run either or both.
+
+### Signaled WebRTC (Phase 2 — works across networks)
+
+Start the signal server somewhere both devices can reach:
+
+```sh
+cargo run --release -p tether-signal -- --bind 192.168.1.5 --secret <shared-secret>
+```
 
 On the host (macOS):
+
+```sh
+cargo run --release -p tetherd -- --signal 192.168.1.5:7879 --secret <shared-secret> \
+    --codec h264 --bitrate-kbps 4000   # codec flags optional; default jpeg
+```
+
+In the controller UI pick **Signaled**, enter the signal server address, the
+secret, and the host's device id (its hostname unless `--device-id` was set).
+Media flows peer-to-peer (DTLS-encrypted); the signal server only introduces
+the peers. NAT traversal is STUN-only — symmetric-NAT pairs won't connect
+(TURN is deferred).
+
+Use `--codec h264` over WAN (~2.5 Mbps at native resolution vs ~125 Mbps for
+JPEG). Connecting to a Mac whose display is asleep works: the screen stays
+black until your first input wakes it.
+
+### LAN WebSocket (Phase 1 path)
 
 ```sh
 cargo run --release -p tetherd -- --bind 192.168.1.10 --allow 192.168.1.20
