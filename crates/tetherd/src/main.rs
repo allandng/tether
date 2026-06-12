@@ -1,6 +1,5 @@
 use clap::Parser;
-use tokio::sync::{mpsc, watch};
-use tether_protocol::Resolution;
+use tokio::sync::mpsc;
 use tetherd::config::Args;
 use tetherd::server::{Server, ServerState};
 use tracing::{debug, info};
@@ -16,10 +15,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    // Capture pipeline lands in Module 3; until then the server runs with an
-    // empty frame source so the connection layer is testable end to end.
-    let (_resolution_tx, resolution_rx) = watch::channel(Resolution { width: 0, height: 0 });
-    let (_frames_tx, frames_rx) = watch::channel(None);
+    let pipeline = start_capture()?;
     let (input_tx, mut input_rx) = mpsc::channel(256);
 
     // Injection lands in Module 5; drain and log so the channel never fills.
@@ -33,7 +29,11 @@ async fn main() -> anyhow::Result<()> {
         args.bind,
         args.port,
         args.allow.clone(),
-        ServerState { resolution: resolution_rx, frames: frames_rx, input_tx },
+        ServerState {
+            resolution: pipeline.resolution,
+            frames: pipeline.frames,
+            input_tx,
+        },
     )
     .await?;
 
@@ -44,4 +44,17 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn start_capture() -> anyhow::Result<tetherd::pipeline::Pipeline> {
+    tetherd::pipeline::start(
+        || tetherd::capture::macos::SckCapturer::main_display(30),
+        || tetherd::encode::JpegEncoder::new(75),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_capture() -> anyhow::Result<tetherd::pipeline::Pipeline> {
+    anyhow::bail!("no screen capture implementation for this platform yet (Phase 1 hosts macOS only)")
 }

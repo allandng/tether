@@ -1,14 +1,19 @@
 use bytes::Bytes;
 use tether_protocol::{Codec, Resolution};
 
-/// One captured frame, tightly packed 32-bit BGRA.
+/// One captured frame, 32-bit BGRA. Rows may be padded: use `bytes_per_row`
+/// (not `width * 4`) to address rows; encoders receive it as the pitch.
 #[derive(Debug, Clone)]
 pub struct RawFrame {
     pub width: u32,
     pub height: u32,
+    pub bytes_per_row: usize,
     pub bgra: Vec<u8>,
     pub timestamp_micros: u64,
 }
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 /// One encoded frame ready for the wire. Cheap to clone (payload is refcounted).
 #[derive(Debug, Clone)]

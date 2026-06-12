@@ -1,0 +1,6 @@
+# The screencapturekit crate links a Swift bridge; its build script bakes the
+# Swift runtime rpath into its own targets only, so downstream binaries (our
+# bins/tests/examples) must add it themselves or dyld can't find
+# libswift_Concurrency.dylib at runtime.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
