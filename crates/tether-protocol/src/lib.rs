@@ -551,6 +551,47 @@ mod tests {
         round_trip(hello);
     }
 
+    /// Byte-for-byte vectors shared with controller/src/protocol.test.ts.
+    /// If this test changes, the TS one must change identically.
+    #[test]
+    fn cross_implementation_byte_vectors() {
+        let hello = Message::Hello(Hello {
+            version: 1,
+            role: Role::Controller,
+            capabilities: CAP_CAN_CONTROL,
+        });
+        assert_eq!(&hello.encode()[..], &[5, 0, 0, 0, 0x01, 1, 0, 1, 2]);
+
+        let resolution = Message::Resolution(Resolution { width: 1920, height: 1080 });
+        assert_eq!(
+            &resolution.encode()[..],
+            &[9, 0, 0, 0, 0x02, 0x80, 0x07, 0, 0, 0x38, 0x04, 0, 0]
+        );
+
+        let frame = Message::FrameData(FrameData {
+            codec: Codec::Jpeg,
+            seq: 7,
+            timestamp_micros: 0x01_0000_0002,
+            payload: Bytes::from_static(&[0xAB, 0xCD]),
+        });
+        assert_eq!(
+            &frame.encode()[..],
+            &[16, 0, 0, 0, 0x03, 0, 7, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0xAB, 0xCD]
+        );
+
+        let key = Message::InputEvent(InputEvent::KeyDown {
+            code: "KeyA".into(),
+            modifiers: 0b1001,
+        });
+        assert_eq!(
+            &key.encode()[..],
+            &[8, 0, 0, 0, 0x04, 4, 0b1001, 4, 0x4B, 0x65, 0x79, 0x41]
+        );
+
+        let mouse = Message::InputEvent(InputEvent::MouseMove { x: 0, y: 65535 });
+        assert_eq!(&mouse.encode()[..], &[6, 0, 0, 0, 0x04, 0, 0, 0, 0xFF, 0xFF]);
+    }
+
     #[test]
     fn stream_decoding_two_messages_back_to_back() {
         let a = Message::InputEvent(InputEvent::MouseMove { x: 1, y: 2 }).encode();
