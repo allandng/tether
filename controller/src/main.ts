@@ -24,14 +24,23 @@ function setup(): void {
 
   const viewer = new Viewer(canvas);
   let status = "closed";
+  let wantConnection = false; // user intent: reconnect on unexpected drops
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   const connection = new TetherConnection({
     onStatus(s, detail) {
       status = s;
       dot.className = s;
-      connectBtn.textContent = s === "closed" ? "Connect" : "Disconnect";
+      connectBtn.textContent = wantConnection ? "Disconnect" : "Connect";
       stats.textContent = detail ?? "";
       if (s === "connected") canvas.focus();
+      if (s === "closed" && wantConnection && !reconnectTimer) {
+        stats.textContent = detail ?? "reconnecting…";
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          if (wantConnection) connection.connect(hostInput.value.trim());
+        }, 1000);
+      }
     },
     onResolution(r) {
       viewer.setResolution(r);
@@ -48,13 +57,22 @@ function setup(): void {
   hostInput.value = params.get("host") ?? localStorage.getItem("tether-host") ?? "";
 
   const toggle = () => {
-    if (status === "closed") {
+    if (!wantConnection) {
       const hostPort = hostInput.value.trim();
       if (!hostPort) return;
       localStorage.setItem("tether-host", hostPort);
+      wantConnection = true;
       connection.connect(hostPort);
     } else {
+      wantConnection = false;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       connection.close();
+      dot.className = "closed";
+      connectBtn.textContent = "Connect";
+      stats.textContent = "";
     }
   };
   connectBtn.addEventListener("click", toggle);
@@ -64,11 +82,16 @@ function setup(): void {
 
   setInterval(() => {
     if (status === "connected") {
-      stats.textContent = `${viewer.fps} fps · ${canvas.width}×${canvas.height}`;
+      // Frame age only means anything when host and controller clocks agree
+      // (e.g. same machine); show it when it looks sane, omit otherwise.
+      const ageMs = (Date.now() * 1000 - viewer.lastFrameTimestampMicros) / 1000;
+      const age = ageMs > 0 && ageMs < 10_000 ? ` · ~${Math.round(ageMs)}ms` : "";
+      stats.textContent = `${viewer.fps} fps · ${canvas.width}×${canvas.height}${age}`;
     }
   }, 500);
 
   if (hostInput.value && params.has("host")) {
+    wantConnection = true;
     connection.connect(hostInput.value);
   }
 }
