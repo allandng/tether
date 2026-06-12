@@ -1,6 +1,10 @@
 use tether_protocol::InputEvent;
 
-/// Platform input injection. macOS implementation arrives in Module 5.
-pub trait InputInjector: Send {
+/// Platform input injection. Not `Send`: platform handles (CGEventSource)
+/// are thread-affine, so injectors are constructed on their worker thread.
+pub trait InputInjector {
     fn inject(&mut self, event: &InputEvent) -> anyhow::Result<()>;
 }
+
+#[cfg(target_os = "macos")]
+pub mod macos;

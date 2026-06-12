@@ -1,4 +1,5 @@
 import { TetherConnection } from "./connection";
+import { attachInput } from "./input";
 import { Viewer } from "./viewer";
 
 function setup(): void {
@@ -39,6 +40,8 @@ function setup(): void {
       viewer.onFrame(f);
     },
   });
+
+  attachInput(canvas, viewer, connection);
 
   // host:port from ?host=, falling back to the last successful value
   const params = new URLSearchParams(location.search);
