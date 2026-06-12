@@ -1,0 +1,219 @@
+//! Integration tests: a real server on loopback, a real tokio-tungstenite
+//! client. The allowlist *rejection* path can't be exercised over loopback
+//! (can't forge a source IP), so that logic is unit-tested in config.rs and
+//! these tests run with 127.0.0.1 allowed.
+
+use std::net::SocketAddr;
+
+use bytes::Bytes;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::{mpsc, watch};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tether_protocol::{
+    CAP_CAN_CONTROL, CAP_CAN_HOST, Codec, Decoded, Hello, InputEvent, Message, MouseButton,
+    PROTOCOL_VERSION, Resolution, Role,
+};
+use tetherd::capture::EncodedFrame;
+use tetherd::server::{Server, ServerState};
+
+struct TestHost {
+    addr: SocketAddr,
+    frames_tx: watch::Sender<Option<EncodedFrame>>,
+    #[allow(dead_code)]
+    resolution_tx: watch::Sender<Resolution>,
+    input_rx: mpsc::Receiver<InputEvent>,
+    server_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestHost {
+    fn drop(&mut self) {
+        self.server_task.abort();
+    }
+}
+
+async fn start_host() -> TestHost {
+    let (resolution_tx, resolution_rx) =
+        watch::channel(Resolution { width: 1920, height: 1080 });
+    let (frames_tx, frames_rx) = watch::channel(None);
+    let (input_tx, input_rx) = mpsc::channel(64);
+    let server = Server::bind(
+        "127.0.0.1".parse().unwrap(),
+        0, // OS-assigned port
+        vec!["127.0.0.1".parse().unwrap()],
+        ServerState { resolution: resolution_rx, frames: frames_rx, input_tx },
+    )
+    .await
+    .expect("bind");
+    let addr = server.local_addr().expect("local addr");
+    let server_task = tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+    TestHost { addr, frames_tx, resolution_tx, input_rx, server_task }
+}
+
+type Client = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+async fn connect(addr: SocketAddr) -> Client {
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .expect("connect");
+    ws
+}
+
+fn controller_hello() -> WsMessage {
+    WsMessage::Binary(
+        Message::Hello(Hello {
+            version: PROTOCOL_VERSION,
+            role: Role::Controller,
+            capabilities: CAP_CAN_CONTROL,
+        })
+        .encode(),
+    )
+}
+
+async fn next_message(ws: &mut Client) -> Option<Message> {
+    loop {
+        match ws.next().await? {
+            Ok(WsMessage::Binary(bytes)) => match Message::decode(&bytes).expect("decode") {
+                Decoded::Message { message, .. } => return Some(message),
+                other => panic!("unexpected decode outcome: {other:?}"),
+            },
+            Ok(WsMessage::Close(_)) | Err(_) => return None,
+            Ok(_) => {}
+        }
+    }
+}
+
+async fn handshake(ws: &mut Client) {
+    ws.send(controller_hello()).await.expect("send hello");
+    let Some(Message::Hello(h)) = next_message(ws).await else {
+        panic!("expected host Hello");
+    };
+    assert_eq!(h.version, PROTOCOL_VERSION);
+    assert_eq!(h.role, Role::Host);
+    assert_ne!(h.capabilities & CAP_CAN_HOST, 0);
+    let Some(Message::Resolution(r)) = next_message(ws).await else {
+        panic!("expected Resolution after Hello");
+    };
+    assert_eq!((r.width, r.height), (1920, 1080));
+}
+
+#[tokio::test]
+async fn handshake_then_frames_then_input() {
+    let mut host = start_host().await;
+    let mut ws = connect(host.addr).await;
+    handshake(&mut ws).await;
+
+    // host publishes a frame -> controller receives FrameData
+    host.frames_tx
+        .send(Some(EncodedFrame {
+            codec: Codec::Jpeg,
+            seq: 1,
+            timestamp_micros: 123,
+            payload: Bytes::from_static(b"fakejpeg"),
+        }))
+        .unwrap();
+    let Some(Message::FrameData(f)) = next_message(&mut ws).await else {
+        panic!("expected FrameData");
+    };
+    assert_eq!(f.seq, 1);
+    assert_eq!(&f.payload[..], b"fakejpeg");
+
+    // controller sends input -> host receives it on the injector channel
+    let ev = InputEvent::MouseDown { button: MouseButton::Left, x: 100, y: 200 };
+    ws.send(WsMessage::Binary(Message::InputEvent(ev.clone()).encode()))
+        .await
+        .unwrap();
+    let received = host.input_rx.recv().await.expect("input event");
+    assert_eq!(received, ev);
+}
+
+#[tokio::test]
+async fn clean_disconnect_then_reconnect_without_restart() {
+    let host = start_host().await;
+
+    let mut ws = connect(host.addr).await;
+    handshake(&mut ws).await;
+    ws.close(None).await.expect("close");
+    drop(ws);
+
+    // Session teardown is async; poll until the slot frees up.
+    let mut reconnected = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let mut ws2 = connect(host.addr).await;
+        ws2.send(controller_hello()).await.expect("send hello");
+        if let Some(Message::Hello(_)) = next_message(&mut ws2).await {
+            reconnected = true;
+            break;
+        }
+    }
+    assert!(reconnected, "server must accept a new session after disconnect");
+}
+
+#[tokio::test]
+async fn second_concurrent_connection_is_rejected() {
+    let host = start_host().await;
+    let mut ws1 = connect(host.addr).await;
+    handshake(&mut ws1).await;
+
+    // Second connection while the first is active: dropped before/at upgrade.
+    let attempt = tokio_tungstenite::connect_async(format!("ws://{}", host.addr)).await;
+    let rejected = match attempt {
+        Err(_) => true,
+        Ok((mut ws2, _)) => {
+            ws2.send(controller_hello()).await.ok();
+            next_message(&mut ws2).await.is_none()
+        }
+    };
+    assert!(rejected, "second concurrent session must be rejected");
+
+    // ...and the first session is unaffected.
+    ws1.send(WsMessage::Binary(
+        Message::InputEvent(InputEvent::MouseMove { x: 1, y: 1 }).encode(),
+    ))
+    .await
+    .expect("first session still usable");
+}
+
+#[tokio::test]
+async fn version_mismatch_is_rejected() {
+    let host = start_host().await;
+    let mut ws = connect(host.addr).await;
+    ws.send(WsMessage::Binary(
+        Message::Hello(Hello {
+            version: PROTOCOL_VERSION + 1,
+            role: Role::Controller,
+            capabilities: CAP_CAN_CONTROL,
+        })
+        .encode(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        next_message(&mut ws).await.is_none(),
+        "host must close instead of answering a bad version"
+    );
+}
+
+#[tokio::test]
+async fn host_role_peer_is_rejected() {
+    let host = start_host().await;
+    let mut ws = connect(host.addr).await;
+    ws.send(WsMessage::Binary(
+        Message::Hello(Hello {
+            version: PROTOCOL_VERSION,
+            role: Role::Host,
+            capabilities: CAP_CAN_HOST,
+        })
+        .encode(),
+    ))
+    .await
+    .unwrap();
+    assert!(
+        next_message(&mut ws).await.is_none(),
+        "host must not accept another host as a peer"
+    );
+}
