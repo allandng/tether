@@ -10,8 +10,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
-    CAP_CAN_CONTROL, CAP_CAN_HOST, Codec, Decoded, Hello, InputEvent, Message, MouseButton,
-    PROTOCOL_VERSION, Resolution, Role,
+    CAP_CAN_CONTROL, CAP_CAN_HOST, ClipboardData, Codec, Decoded, Hello, InputEvent, Message,
+    MouseButton, PROTOCOL_VERSION, Resolution, Role,
 };
 use tetherd::capture::EncodedFrame;
 use tetherd::server::{Server, ServerState};
@@ -22,6 +22,8 @@ struct TestHost {
     #[allow(dead_code)]
     resolution_tx: watch::Sender<Resolution>,
     input_rx: mpsc::Receiver<InputEvent>,
+    clipboard_out_tx: watch::Sender<Option<String>>,
+    clipboard_in_rx: std::sync::mpsc::Receiver<String>,
     server_task: tokio::task::JoinHandle<()>,
 }
 
@@ -36,11 +38,19 @@ async fn start_host() -> TestHost {
         watch::channel(Resolution { width: 1920, height: 1080 });
     let (frames_tx, frames_rx) = watch::channel(None);
     let (input_tx, input_rx) = mpsc::channel(64);
+    let (clipboard_out_tx, clipboard_out_rx) = watch::channel(None);
+    let (clipboard_in_tx, clipboard_in_rx) = std::sync::mpsc::channel();
     let server = Server::bind(
         "127.0.0.1".parse().unwrap(),
         0, // OS-assigned port
         vec!["127.0.0.1".parse().unwrap()],
-        ServerState { resolution: resolution_rx, frames: frames_rx, input_tx },
+        ServerState {
+            resolution: resolution_rx,
+            frames: frames_rx,
+            input_tx,
+            clipboard_out: clipboard_out_rx,
+            clipboard_in: clipboard_in_tx,
+        },
     )
     .await
     .expect("bind");
@@ -48,7 +58,15 @@ async fn start_host() -> TestHost {
     let server_task = tokio::spawn(async move {
         let _ = server.run().await;
     });
-    TestHost { addr, frames_tx, resolution_tx, input_rx, server_task }
+    TestHost {
+        addr,
+        frames_tx,
+        resolution_tx,
+        input_rx,
+        clipboard_out_tx,
+        clipboard_in_rx,
+        server_task,
+    }
 }
 
 type Client = tokio_tungstenite::WebSocketStream<
@@ -128,6 +146,35 @@ async fn handshake_then_frames_then_input() {
         .unwrap();
     let received = host.input_rx.recv().await.expect("input event");
     assert_eq!(received, ev);
+}
+
+#[tokio::test]
+async fn clipboard_relays_both_directions() {
+    let host = start_host().await;
+    let mut ws = connect(host.addr).await;
+    handshake(&mut ws).await;
+
+    // host -> controller
+    host.clipboard_out_tx.send(Some("copied on host".into())).unwrap();
+    match next_message(&mut ws).await {
+        Some(Message::ClipboardData(c)) => assert_eq!(c.text, "copied on host"),
+        other => panic!("expected ClipboardData, got {other:?}"),
+    }
+
+    // controller -> host
+    ws.send(WsMessage::Binary(
+        Message::ClipboardData(ClipboardData { text: "copied on controller".into() }).encode(),
+    ))
+    .await
+    .unwrap();
+    let received = tokio::task::spawn_blocking(move || {
+        host.clipboard_in_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+    })
+    .await
+    .unwrap()
+    .expect("clipboard not relayed to host");
+    assert_eq!(received, "copied on controller");
 }
 
 #[tokio::test]

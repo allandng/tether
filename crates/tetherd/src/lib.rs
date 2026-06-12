@@ -2,6 +2,7 @@
 //! everything lives here so integration tests can drive a real server.
 
 pub mod capture;
+pub mod clipboard;
 pub mod config;
 pub mod encode;
 pub mod input;

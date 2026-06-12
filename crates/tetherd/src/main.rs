@@ -19,11 +19,14 @@ async fn main() -> anyhow::Result<()> {
     let pipeline = start_capture(args.codec, args.bitrate_kbps)?;
     let (input_tx, input_rx) = mpsc::channel(256);
     start_injector(input_rx);
+    let clipboard = start_clipboard()?;
 
     let state = ServerState {
         resolution: pipeline.resolution,
         frames: pipeline.frames,
         input_tx,
+        clipboard_out: clipboard.outbound,
+        clipboard_in: clipboard.inbound_tx,
     };
 
     let lan = match args.bind {
@@ -123,4 +126,26 @@ fn start_injector(mut input_rx: mpsc::Receiver<tether_protocol::InputEvent>) {
 #[cfg(not(target_os = "macos"))]
 fn start_injector(mut input_rx: mpsc::Receiver<tether_protocol::InputEvent>) {
     tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+}
+
+#[cfg(target_os = "macos")]
+fn start_clipboard() -> anyhow::Result<tetherd::clipboard::ClipboardSync> {
+    Ok(tetherd::clipboard::start(tetherd::clipboard::macos::MacClipboard::new)?)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_clipboard() -> anyhow::Result<tetherd::clipboard::ClipboardSync> {
+    struct NoClipboard;
+    impl tetherd::clipboard::Clipboard for NoClipboard {
+        fn change_count(&mut self) -> i64 {
+            0
+        }
+        fn read_text(&mut self) -> Option<String> {
+            None
+        }
+        fn write_text(&mut self, _text: &str) -> i64 {
+            0
+        }
+    }
+    Ok(tetherd::clipboard::start(|| NoClipboard)?)
 }

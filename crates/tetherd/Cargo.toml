@@ -13,9 +13,12 @@ core-foundation = "0.10.1"
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 futures-util = "0.3.32"
 gethostname = "1.1.0"
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-core-media = "0.3.2"
 objc2-core-video = "0.3.2"
+objc2-foundation = "0.3.2"
 objc2-video-toolbox = "0.3.2"
 screencapturekit = "7.0.1"
 serde = { version = "1.0.228", features = ["derive"] }

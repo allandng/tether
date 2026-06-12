@@ -62,6 +62,9 @@ async fn full_pipeline_sustains_gate_framerate() {
     .expect("pipeline start");
 
     let (input_tx, _input_rx) = mpsc::channel(8);
+    // senders must outlive the test or sessions treat the sources as closed
+    let (_clipboard_out_tx, clipboard_out_rx) = tokio::sync::watch::channel(None);
+    let (clipboard_in_tx, _clipboard_in_rx) = std::sync::mpsc::channel::<String>();
     let server = Server::bind(
         "127.0.0.1".parse().unwrap(),
         0,
@@ -70,6 +73,8 @@ async fn full_pipeline_sustains_gate_framerate() {
             resolution: pipeline.resolution,
             frames: pipeline.frames,
             input_tx,
+            clipboard_out: clipboard_out_rx,
+            clipboard_in: clipboard_in_tx,
         },
     )
     .await

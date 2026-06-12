@@ -18,8 +18,8 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use tether_protocol::{
-    CAP_CAN_CONTROL, Codec, Decoded, Hello, InputEvent, Message, PROTOCOL_VERSION, Resolution,
-    Role,
+    CAP_CAN_CONTROL, ClipboardData, Codec, Decoded, Hello, InputEvent, Message, PROTOCOL_VERSION,
+    Resolution, Role,
 };
 use tether_signal::protocol::{Caps, ClientMessage, ServerMessage};
 use tetherd::capture::{EncodedFrame, RawFrame, ScreenCapturer};
@@ -77,10 +77,14 @@ async fn webrtc_end_to_end_frames_and_input() {
     )
     .expect("pipeline");
     let (input_tx, mut input_rx) = mpsc::channel(64);
+    let (clipboard_out_tx, clipboard_out_rx) = tokio::sync::watch::channel(None);
+    let (clipboard_in_tx, clipboard_in_rx) = std::sync::mpsc::channel::<String>();
     let state = ServerState {
         resolution: pipeline.resolution,
         frames: pipeline.frames,
         input_tx,
+        clipboard_out: clipboard_out_rx,
+        clipboard_in: clipboard_in_tx,
     };
     tokio::spawn(run_host(
         RtcConfig {
@@ -260,6 +264,35 @@ async fn webrtc_end_to_end_frames_and_input() {
         .expect("timed out waiting for input event")
         .expect("input channel closed");
     assert_eq!(received, ev);
+
+    // --- clipboard, both directions over the ctl channel
+    ctl.send(
+        &Message::ClipboardData(ClipboardData { text: "from controller".into() }).encode(),
+    )
+    .await
+    .unwrap();
+    let clip = tokio::task::spawn_blocking(move || {
+        clipboard_in_rx.recv_timeout(Duration::from_secs(5))
+    })
+    .await
+    .unwrap()
+    .expect("clipboard not relayed to host");
+    assert_eq!(clip, "from controller");
+
+    clipboard_out_tx.send(Some("from host".into())).unwrap();
+    let got = tokio::time::timeout(deadline, async {
+        loop {
+            let bytes = ctl_rx.recv().await.expect("ctl closed");
+            if let Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) =
+                Message::decode(&bytes)
+            {
+                return c.text;
+            }
+        }
+    })
+    .await
+    .expect("host clipboard never arrived on ctl");
+    assert_eq!(got, "from host");
 
     pc.close().await.ok();
 }

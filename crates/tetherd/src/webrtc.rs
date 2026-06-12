@@ -26,7 +26,7 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use tether_protocol::{Decoded, FrameData, Message, Resolution};
+use tether_protocol::{ClipboardData, Decoded, FrameData, Message, Resolution};
 use tether_signal::protocol::{Caps, ClientMessage, ErrorCode, ServerMessage};
 use tracing::{debug, info, warn};
 
@@ -345,6 +345,15 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
         if dc.send(&Message::Resolution(current).encode()).await.is_err() {
             return;
         }
+        // current host clipboard, so paste works before the next copy
+        let mut clipboard = state.clipboard_out.clone();
+        let current_clip = clipboard.borrow_and_update().clone();
+        if let Some(text) = current_clip {
+            let msg = Message::ClipboardData(ClipboardData { text });
+            if dc.send(&msg.encode()).await.is_err() {
+                return;
+            }
+        }
         info!("webrtc controller connected");
 
         loop {
@@ -358,11 +367,26 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
                         break;
                     }
                 }
+                changed = clipboard.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let text = clipboard.borrow_and_update().clone();
+                    if let Some(text) = text {
+                        let msg = Message::ClipboardData(ClipboardData { text });
+                        if dc.send(&msg.encode()).await.is_err() {
+                            break;
+                        }
+                    }
+                }
                 incoming = in_rx.recv() => {
                     let Some(bytes) = incoming else { break };
                     match Message::decode(&bytes) {
                         Ok(Decoded::Message { message: Message::InputEvent(ev), .. }) => {
                             let _ = state.input_tx.send(ev).await;
+                        }
+                        Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
+                            let _ = state.clipboard_in.send(c.text);
                         }
                         Ok(Decoded::Unknown { msg_type, .. }) => {
                             debug!(msg_type, "ignoring unknown message type");

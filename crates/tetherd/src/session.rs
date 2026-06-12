@@ -8,7 +8,8 @@ use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
-    CAP_CAN_CONTROL, CAP_CAN_HOST, Decoded, FrameData, Hello, Message, PROTOCOL_VERSION, Role,
+    CAP_CAN_CONTROL, CAP_CAN_HOST, ClipboardData, Decoded, FrameData, Hello, Message,
+    PROTOCOL_VERSION, Role,
 };
 use tracing::{debug, info, warn};
 
@@ -43,6 +44,12 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
     // A controller connecting mid-stream should get the current frame
     // immediately rather than waiting for the next capture.
     frames.mark_changed();
+    // ...and the current host clipboard, so paste works before the next copy.
+    let mut clipboard = state.clipboard_out.clone();
+    let current_clip = clipboard.borrow_and_update().clone();
+    if let Some(text) = current_clip {
+        send(&mut ws, &Message::ClipboardData(ClipboardData { text })).await?;
+    }
 
     loop {
         tokio::select! {
@@ -66,7 +73,16 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
                     bail!("resolution source closed");
                 }
                 let current_resolution = *resolution.borrow_and_update();
-    send(&mut ws, &Message::Resolution(current_resolution)).await?;
+                send(&mut ws, &Message::Resolution(current_resolution)).await?;
+            }
+            changed = clipboard.changed() => {
+                if changed.is_err() {
+                    bail!("clipboard source closed");
+                }
+                let text = clipboard.borrow_and_update().clone();
+                if let Some(text) = text {
+                    send(&mut ws, &Message::ClipboardData(ClipboardData { text })).await?;
+                }
             }
             incoming = ws.next() => {
                 match incoming {
@@ -92,6 +108,9 @@ async fn handle_incoming(bytes: &[u8], state: &ServerState) {
             debug!(?ev, "input event");
             // If the injector is gone the daemon is shutting down; drop silently.
             let _ = state.input_tx.send(ev).await;
+        }
+        Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
+            let _ = state.clipboard_in.send(c.text);
         }
         Ok(Decoded::Unknown { msg_type, .. }) => {
             debug!(msg_type, "ignoring unknown message type");

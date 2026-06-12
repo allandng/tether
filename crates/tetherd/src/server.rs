@@ -22,6 +22,10 @@ pub struct ServerState {
     pub frames: watch::Receiver<Option<EncodedFrame>>,
     /// Input events bound for the platform injector.
     pub input_tx: mpsc::Sender<InputEvent>,
+    /// Latest host clipboard text; `None` until the first copy.
+    pub clipboard_out: watch::Receiver<Option<String>>,
+    /// Clipboard content from the controller, bound for the host pasteboard.
+    pub clipboard_in: std::sync::mpsc::Sender<String>,
 }
 
 pub struct Server {
