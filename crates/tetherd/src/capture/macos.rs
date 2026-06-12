@@ -72,11 +72,14 @@ impl SckCapturer {
             .or_else(|| displays.first())
             .context("no displays available to capture")?;
 
-        // SCDisplay reports points; capture at native pixels (gate criterion).
-        let (px_w, px_h) = (
-            CGDisplay::main().pixels_wide() as u32,
-            CGDisplay::main().pixels_high() as u32,
-        );
+        // SCDisplay (and CGDisplayPixelsWide, despite the name) report the
+        // scaled mode's logical size; the display *mode* carries the true
+        // backing pixel dimensions (gate criterion: native resolution).
+        let main = CGDisplay::main();
+        let (px_w, px_h) = match main.display_mode() {
+            Some(mode) => (mode.pixel_width() as u32, mode.pixel_height() as u32),
+            None => (main.pixels_wide() as u32, main.pixels_high() as u32),
+        };
 
         let filter = SCContentFilter::create()
             .with_display(display)
