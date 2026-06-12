@@ -32,8 +32,18 @@ pub trait ScreenCapturer: Send {
     fn next_frame(&mut self) -> anyhow::Result<RawFrame>;
 }
 
-/// Frame encoder. JPEG in Phase 1; H.264/VideoToolbox is a drop-in later.
+/// Frame encoder. JPEG (turbojpeg) or H.264 (VideoToolbox), selected at
+/// startup via --codec.
 pub trait FrameEncoder: Send {
     fn codec(&self) -> Codec;
     fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes>;
+}
+
+impl FrameEncoder for Box<dyn FrameEncoder> {
+    fn codec(&self) -> Codec {
+        (**self).codec()
+    }
+    fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes> {
+        (**self).encode(frame)
+    }
 }

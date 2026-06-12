@@ -67,10 +67,11 @@ export class WebRtcTransport implements Transport {
     };
     ctl.onclose = () => this.fail("control channel closed");
 
-    const media = pc.createDataChannel("tether-media", {
-      ordered: false,
-      maxRetransmits: 0,
-    });
+    // Reliable + ordered: H.264 delta frames poison the stream if any
+    // predecessor is lost, so loss-tolerance moved to the host (it drops raw
+    // frames before the encoder, and keyframes every 2s self-heal). Chunking
+    // remains for the 64KiB message-size cap.
+    const media = pc.createDataChannel("tether-media", { ordered: true });
     media.binaryType = "arraybuffer";
     media.onmessage = (e) => {
       if (!(e.data instanceof ArrayBuffer)) return;

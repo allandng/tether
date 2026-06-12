@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     args.validate().map_err(anyhow::Error::msg)?;
 
-    let pipeline = start_capture()?;
+    let pipeline = start_capture(args.codec, args.bitrate_kbps)?;
     let (input_tx, input_rx) = mpsc::channel(256);
     start_injector(input_rx);
 
@@ -71,15 +71,28 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn start_capture() -> anyhow::Result<tetherd::pipeline::Pipeline> {
+fn start_capture(
+    codec: tetherd::config::CodecArg,
+    bitrate_kbps: u32,
+) -> anyhow::Result<tetherd::pipeline::Pipeline> {
+    use tetherd::capture::FrameEncoder;
+    use tetherd::config::CodecArg;
     tetherd::pipeline::start(
         || tetherd::capture::macos::SckCapturer::main_display(30),
-        || tetherd::encode::JpegEncoder::new(75),
+        move || -> anyhow::Result<Box<dyn FrameEncoder>> {
+            Ok(match codec {
+                CodecArg::Jpeg => Box::new(tetherd::encode::JpegEncoder::new(75)?),
+                CodecArg::H264 => Box::new(tetherd::encode::h264::VtH264Encoder::new(bitrate_kbps)?),
+            })
+        },
     )
 }
 
 #[cfg(not(target_os = "macos"))]
-fn start_capture() -> anyhow::Result<tetherd::pipeline::Pipeline> {
+fn start_capture(
+    _codec: tetherd::config::CodecArg,
+    _bitrate_kbps: u32,
+) -> anyhow::Result<tetherd::pipeline::Pipeline> {
     anyhow::bail!("no screen capture implementation for this platform yet (Phase 1 hosts macOS only)")
 }
 

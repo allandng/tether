@@ -38,6 +38,21 @@ pub struct Args {
     /// STUN server (repeatable).
     #[arg(long = "stun", default_value = "stun:stun.l.google.com:19302")]
     pub stun: Vec<String>,
+
+    /// Frame codec. JPEG is robust everywhere; H.264 (hardware, VideoToolbox)
+    /// cuts bandwidth ~10x and is what you want over WAN.
+    #[arg(long, value_enum, default_value_t = CodecArg::Jpeg)]
+    pub codec: CodecArg,
+
+    /// Target bitrate for --codec h264.
+    #[arg(long, default_value_t = 4000)]
+    pub bitrate_kbps: u32,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodecArg {
+    Jpeg,
+    H264,
 }
 
 impl Args {
