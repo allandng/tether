@@ -69,6 +69,9 @@ function setup(): void {
       viewer.onFrame(f);
     },
     onClipboard(text) {
+      // debug handle: lets tests and consoles inspect the last received
+      // clipboard without fighting browser clipboard-read permissions
+      (window as unknown as Record<string, unknown>).__tetherLastClipboard = text;
       void hostClipboard.receive(text);
     },
   };

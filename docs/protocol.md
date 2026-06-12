@@ -142,16 +142,20 @@ applied or sent.
 
 ## WebRTC transport mapping (Phase 2)
 
-Two data channels, both carrying the wire format above unchanged:
+Three data channels, all carrying the wire format above unchanged:
 
-- **`tether-ctl`** (reliable, ordered): `Hello`, `Resolution`, `InputEvent`.
-- **`tether-media`** (reliable, ordered): `FrameData` only, split into chunks
-  because browsers cap data-channel message sizes. Each chunk is
-  `[u32 LE frame_seq][u16 LE chunk_idx][u16 LE chunk_count]` followed by a
-  slice of the complete wire message; payload ≤ 64 KiB − 8. Reassembly is
-  latest-wins. The chunk header is transport framing, not part of the tether
-  protocol (reference impls: `controller/src/chunks.ts`,
-  `crates/tetherd/src/webrtc.rs`).
+- **`tether-ctl`** (reliable, ordered): `Hello`, `Resolution`, `InputEvent` —
+  small messages only (single data-channel messages cap at ~16 KiB for safe
+  interop; some stacks silently drop larger ones).
+- **`tether-media`** (reliable, ordered): `FrameData` only, chunked.
+- **`tether-bulk`** (reliable, ordered): anything oversized — `ClipboardData`
+  today, file transfer later — chunked with the same framing.
+
+Chunk framing (media and bulk): `[u32 LE seq][u16 LE chunk_idx]
+[u16 LE chunk_count]` followed by a slice of the complete wire message;
+payload ≤ 16 KiB − 8. Reassembly is latest-wins per channel. The chunk header
+is transport framing, not part of the tether protocol (reference impls:
+`controller/src/chunks.ts`, `crates/tetherd/src/webrtc.rs`).
 
 H.264 `FrameData` payloads are Annex B access units (4-byte start codes,
 SPS/PPS in-band on keyframes); each payload is one complete, independently

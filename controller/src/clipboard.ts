@@ -19,6 +19,12 @@ export interface ClipboardOut {
 
 export const PASTE_FALLBACK_MS = 75;
 
+/** Pastes at or above this size delay the V keystroke briefly: clipboard and
+ * input ride different WebRTC channels, so cross-channel ordering isn't
+ * guaranteed and a large transfer needs a head start. */
+export const LARGE_PASTE_BYTES = 32 * 1024;
+export const LARGE_PASTE_DELAY_MS = 150;
+
 /** State machine for the Cmd/Ctrl+V intercept. */
 export class PasteFlow {
   private armedModifiers: number | null = null;
@@ -67,6 +73,10 @@ export class PasteFlow {
     this.swallowKeyUps++;
     if (text) {
       this.out.sendClipboard(text);
+      if (text.length >= LARGE_PASTE_BYTES) {
+        setTimeout(() => this.out.sendKeyTap("KeyV", modifiers), LARGE_PASTE_DELAY_MS);
+        return;
+      }
     }
     this.out.sendKeyTap("KeyV", modifiers);
   }

@@ -1,16 +1,19 @@
 // WebRTC transport: signal → offer → two data channels → ProtocolSession.
 //
 // Channel layout (mirrored by tetherd's webrtc module):
-//   "tether-ctl"   reliable + ordered    Hello, Resolution, InputEvent
-//   "tether-media" unordered, no retx    FrameData, chunked (see chunks.ts)
+//   "tether-ctl"   reliable + ordered  Hello, Resolution, InputEvent
+//   "tether-media" reliable + ordered  FrameData, chunked (see chunks.ts)
+//   "tether-bulk"  reliable + ordered  oversized messages (clipboard),
+//                                      chunked — SCTP caps single messages
+//                                      at ~64 KiB
 //
 // The controller always initiates: it creates both channels and the offer;
 // the host answers. Media stays peer-to-peer (DTLS); the signal server only
 // introduces us.
 
-import { FrameReassembler } from "./chunks";
+import { FrameReassembler, chunkFrame } from "./chunks";
 import type { ConnectionEvents, Transport } from "./connection";
-import type { InputEvent } from "./protocol";
+import { encodeClipboardData, type InputEvent } from "./protocol";
 import { ProtocolSession } from "./session";
 import { SignalingClient } from "./signaling";
 
@@ -28,9 +31,12 @@ const DEFAULT_STUN = ["stun:stun.l.google.com:19302"];
 export class WebRtcTransport implements Transport {
   private pc: RTCPeerConnection | null = null;
   private ctl: RTCDataChannel | null = null;
+  private bulk: RTCDataChannel | null = null;
+  private bulkSeq = 0;
   private signaling: SignalingClient | null = null;
   private session: ProtocolSession | null = null;
   private readonly reassembler = new FrameReassembler();
+  private readonly bulkReassembler = new FrameReassembler();
 
   constructor(private readonly events: ConnectionEvents) {}
 
@@ -77,6 +83,15 @@ export class WebRtcTransport implements Transport {
     media.onmessage = (e) => {
       if (!(e.data instanceof ArrayBuffer)) return;
       const wire = this.reassembler.onChunk(e.data);
+      if (wire) session.onMessage(wire);
+    };
+
+    const bulk = pc.createDataChannel("tether-bulk", { ordered: true });
+    bulk.binaryType = "arraybuffer";
+    this.bulk = bulk;
+    bulk.onmessage = (e) => {
+      if (!(e.data instanceof ArrayBuffer)) return;
+      const wire = this.bulkReassembler.onChunk(e.data);
       if (wire) session.onMessage(wire);
     };
 
@@ -146,7 +161,14 @@ export class WebRtcTransport implements Transport {
   }
 
   sendClipboard(text: string): void {
-    this.session?.sendClipboard(text);
+    // Always via the bulk channel: a single data-channel message caps out
+    // around 64 KiB, and clipboard may be up to 256 KiB.
+    if (!this.connected || this.bulk?.readyState !== "open") return;
+    this.bulkSeq = (this.bulkSeq + 1) >>> 0;
+    const wire = encodeClipboardData({ text });
+    for (const chunk of chunkFrame(this.bulkSeq, wire)) {
+      this.bulk.send(chunk as Uint8Array<ArrayBuffer>);
+    }
   }
 
   close(): void {
@@ -154,6 +176,7 @@ export class WebRtcTransport implements Transport {
     this.signaling = null;
     this.session = null;
     this.ctl = null;
+    this.bulk = null;
     const pc = this.pc;
     this.pc = null;
     if (pc) {

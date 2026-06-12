@@ -14,9 +14,7 @@ pub struct MacClipboard {
 
 impl MacClipboard {
     pub fn new() -> Self {
-        // SAFETY: generalPasteboard is callable from any thread; the retained
-        // pasteboard stays on this thread.
-        MacClipboard { pasteboard: unsafe { NSPasteboard::generalPasteboard() } }
+        MacClipboard { pasteboard: NSPasteboard::generalPasteboard() }
     }
 }
 
@@ -28,8 +26,7 @@ impl Default for MacClipboard {
 
 impl Clipboard for MacClipboard {
     fn change_count(&mut self) -> i64 {
-        // SAFETY: simple property read on a valid pasteboard.
-        unsafe { self.pasteboard.changeCount() as i64 }
+        self.pasteboard.changeCount() as i64
     }
 
     fn read_text(&mut self) -> Option<String> {

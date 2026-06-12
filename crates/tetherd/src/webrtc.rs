@@ -39,7 +39,9 @@ use crate::session::{host_hello, validate_controller_hello};
 //   [ u32 LE frame_seq ][ u16 LE chunk_idx ][ u16 LE chunk_count ][ slice ]
 // over slices of the complete tether wire message.
 
-pub const CHUNK_PAYLOAD: usize = 64 * 1024 - 8;
+// 16 KiB per message is the safe interop bound for data channels (and
+// webrtc-rs silently drops inbound messages at its 64 KiB buffer boundary).
+pub const CHUNK_PAYLOAD: usize = 16 * 1024 - 8;
 const CHUNK_HEADER: usize = 8;
 
 pub fn chunk_frame(frame_seq: u32, wire: &[u8]) -> Vec<Bytes> {
@@ -294,9 +296,11 @@ async fn answer_offer(
         pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let state = state.clone();
             Box::pin(async move {
+                debug!(label = %dc.label(), "data channel announced");
                 match dc.label() {
                     "tether-ctl" => wire_ctl_channel(dc, state),
                     "tether-media" => wire_media_channel(dc, state.frames.clone()),
+                    "tether-bulk" => wire_bulk_channel(dc, state),
                     other => debug!(label = %other, "ignoring unexpected data channel"),
                 }
             })
@@ -345,15 +349,6 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
         if dc.send(&Message::Resolution(current).encode()).await.is_err() {
             return;
         }
-        // current host clipboard, so paste works before the next copy
-        let mut clipboard = state.clipboard_out.clone();
-        let current_clip = clipboard.borrow_and_update().clone();
-        if let Some(text) = current_clip {
-            let msg = Message::ClipboardData(ClipboardData { text });
-            if dc.send(&msg.encode()).await.is_err() {
-                return;
-            }
-        }
         info!("webrtc controller connected");
 
         loop {
@@ -365,18 +360,6 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
                     let current: Resolution = *resolution.borrow_and_update();
                     if dc.send(&Message::Resolution(current).encode()).await.is_err() {
                         break;
-                    }
-                }
-                changed = clipboard.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    let text = clipboard.borrow_and_update().clone();
-                    if let Some(text) = text {
-                        let msg = Message::ClipboardData(ClipboardData { text });
-                        if dc.send(&msg.encode()).await.is_err() {
-                            break;
-                        }
                     }
                 }
                 incoming = in_rx.recv() => {
@@ -397,6 +380,60 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
             }
         }
         info!("webrtc controller disconnected");
+    });
+}
+
+/// Bulk channel: messages too large for a single data-channel message
+/// (SCTP implementations cap at ~64 KiB), carried via the same chunk framing
+/// as media. Clipboard both directions today; file transfer later.
+fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
+    // inbound: reassemble → decode → dispatch (clipboard only, for now)
+    let reassembler = Arc::new(Mutex::new(FrameReassembler::default()));
+    {
+        let state = state.clone();
+        dc.on_message(Box::new(move |msg| {
+            let reassembler = reassembler.clone();
+            let state = state.clone();
+            Box::pin(async move {
+                debug!(len = msg.data.len(), "bulk chunk received");
+                let Some(wire) = reassembler.lock().await.on_chunk(&msg.data) else {
+                    return;
+                };
+                match Message::decode(&wire) {
+                    Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
+                        let _ = state.clipboard_in.send(c.text);
+                    }
+                    other => debug!(?other, "ignoring non-clipboard bulk message"),
+                }
+            })
+        }));
+    }
+
+    // outbound: host clipboard, chunked; includes the current value at open
+    let opened = Arc::new(tokio::sync::Notify::new());
+    {
+        let opened = opened.clone();
+        dc.on_open(Box::new(move || {
+            opened.notify_one();
+            Box::pin(async {})
+        }));
+    }
+    tokio::spawn(async move {
+        opened.notified().await;
+        let mut clipboard = state.clipboard_out.clone();
+        clipboard.mark_changed();
+        let mut bulk_seq: u32 = 0;
+        while clipboard.changed().await.is_ok() {
+            let text = clipboard.borrow_and_update().clone();
+            let Some(text) = text else { continue };
+            bulk_seq = bulk_seq.wrapping_add(1);
+            let wire = Message::ClipboardData(ClipboardData { text }).encode();
+            for chunk in chunk_frame(bulk_seq, &wire) {
+                if dc.send(&chunk).await.is_err() {
+                    return; // channel closed; session is ending
+                }
+            }
+        }
     });
 }
 

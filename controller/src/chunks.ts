@@ -12,7 +12,9 @@
 // — the tether protocol already tolerates seq gaps. The Rust side mirrors
 // this format in tetherd's webrtc module.
 
-export const CHUNK_PAYLOAD = 64 * 1024 - 8;
+// 16 KiB per message is the safe interop bound for data channels; larger
+// messages are dropped silently by some receivers (webrtc-rs at 64 KiB).
+export const CHUNK_PAYLOAD = 16 * 1024 - 8;
 const HEADER = 8;
 
 export function chunkFrame(frameSeq: number, wire: Uint8Array): Uint8Array[] {

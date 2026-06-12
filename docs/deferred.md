@@ -28,3 +28,14 @@ each got the simplest choice that doesn't block Phase 2.
 | **Signaling TLS** | Plain `ws://` to the signal server (LAN/tunnel assumption). DTLS protects media regardless; signaling metadata and the secret are cleartext on the wire. | Before any internet-exposed signal server: `wss://` via a reverse proxy. |
 | **Encoded-frame drops under extreme backpressure** | The pipeline's watch channel can skip encoded H.264 frames if a consumer stalls outright; the 2 s keyframe interval self-heals visible corruption. Proper fix is per-session lossless queues with pre-encoder backpressure. | Phase 5 (multi-consumer pipelines). |
 | **Signaling error UX** | A bad secret surfaces as a retry loop with a generic "signaling closed" status rather than a clear "wrong secret" message. | First UI polish pass. |
+
+## Phase 3 additions
+
+| Decision | Phase 3 choice | Revisit when |
+|---|---|---|
+| **Clipboard content types** | UTF-8 text only; the wire kind byte reserves room for images/files/RTF. | When someone actually misses it (likely alongside file transfer over tether-bulk). |
+| **Cross-channel paste ordering** | Clipboard rides tether-bulk, keystrokes ride tether-ctl: ordering between them is probabilistic. Small pastes are effectively safe; ≥32 KiB pastes delay the V keystroke 150 ms. | Proper fix: a clipboard-applied ack before the keystroke, or one host-side ordered command queue. |
+| **Ctrl+V from non-Mac keyboards** | Forwarded raw (Ctrl+V ≠ paste in most macOS apps). The paste *sync* still happens; only the keystroke semantics differ. | Phase 4 device UX: optional ctrl→cmd remapping. |
+| **Clipboard history / multi-item** | Last-copy-wins only. | Probably never (out of product scope). |
+| **iPad paste affordance** | Hardware-keyboard Cmd+V works; no touch-native paste gesture in the controller UI. | Phase 4 touch UX. |
+| **navigator.clipboard on HTTPS** | Auto-write requires a secure context; LAN HTTP serving means the chip is the common path on real devices. | If the controller ever ships with TLS/PWA packaging. |

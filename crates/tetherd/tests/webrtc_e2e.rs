@@ -62,6 +62,9 @@ impl ScreenCapturer for SyntheticCapturer {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn webrtc_end_to_end_frames_and_input() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("tetherd=debug")
+        .try_init();
     // --- signal server (in process)
     let signal_state = tether_signal::server::AppState::new(SECRET.into());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -131,6 +134,17 @@ async fn webrtc_end_to_end_frames_and_input() {
         let media_tx = media_tx.clone();
         Box::pin(async move {
             let _ = media_tx.send(m.data);
+        })
+    }));
+    let bulk = pc
+        .create_data_channel("tether-bulk", Some(RTCDataChannelInit { ordered: Some(true), ..Default::default() }))
+        .await
+        .unwrap();
+    let (bulk_tx, mut bulk_rx) = mpsc::unbounded_channel::<Bytes>();
+    bulk.on_message(Box::new(move |m| {
+        let bulk_tx = bulk_tx.clone();
+        Box::pin(async move {
+            let _ = bulk_tx.send(m.data);
         })
     }));
     {
@@ -265,34 +279,41 @@ async fn webrtc_end_to_end_frames_and_input() {
         .expect("input channel closed");
     assert_eq!(received, ev);
 
-    // --- clipboard, both directions over the ctl channel
-    ctl.send(
-        &Message::ClipboardData(ClipboardData { text: "from controller".into() }).encode(),
-    )
-    .await
-    .unwrap();
+    // --- clipboard, both directions over the bulk channel, sized past the
+    // single-message SCTP limit to prove the chunked path.
+    // (In-process there is no RTT between the host learning of the channel
+    // and our first send; give its handler registration a moment.)
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let big_up = "u".repeat(100_000);
+    let wire = Message::ClipboardData(ClipboardData { text: big_up.clone() }).encode();
+    for chunk in tetherd::webrtc::chunk_frame(1, &wire) {
+        bulk.send(&chunk).await.unwrap();
+    }
     let clip = tokio::task::spawn_blocking(move || {
         clipboard_in_rx.recv_timeout(Duration::from_secs(5))
     })
     .await
     .unwrap()
     .expect("clipboard not relayed to host");
-    assert_eq!(clip, "from controller");
+    assert_eq!(clip, big_up);
 
-    clipboard_out_tx.send(Some("from host".into())).unwrap();
+    let big_down = "d".repeat(100_000);
+    clipboard_out_tx.send(Some(big_down.clone())).unwrap();
+    let mut bulk_reassembler = FrameReassembler::default();
     let got = tokio::time::timeout(deadline, async {
         loop {
-            let bytes = ctl_rx.recv().await.expect("ctl closed");
+            let bytes = bulk_rx.recv().await.expect("bulk closed");
+            let Some(wire) = bulk_reassembler.on_chunk(&bytes) else { continue };
             if let Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) =
-                Message::decode(&bytes)
+                Message::decode(&wire)
             {
                 return c.text;
             }
         }
     })
     .await
-    .expect("host clipboard never arrived on ctl");
-    assert_eq!(got, "from host");
+    .expect("host clipboard never arrived on bulk");
+    assert_eq!(got, big_down);
 
     pc.close().await.ok();
 }
