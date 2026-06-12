@@ -1,0 +1,10 @@
+[package]
+name = "tether-protocol"
+description = "Transport-agnostic wire protocol types for Tether"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true

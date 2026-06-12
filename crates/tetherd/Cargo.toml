@@ -1,0 +1,9 @@
+[package]
+name = "tetherd"
+description = "Tether host daemon: screen capture, input injection, frame streaming"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tether-protocol.workspace = true

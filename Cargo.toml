@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/tether-protocol", "crates/tetherd"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+tether-protocol = { path = "crates/tether-protocol" }
+bytes = "1"
+thiserror = "2"
