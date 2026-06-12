@@ -1,6 +1,7 @@
 // Capture pointer/wheel/keyboard events over the viewport and forward them
 // as protocol InputEvents with normalized coordinates.
 
+import type { PasteFlow } from "./clipboard";
 import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, type InputEvent } from "./protocol";
 import type { Viewer } from "./viewer";
 
@@ -53,7 +54,12 @@ export function wheelToPixels(delta: number, deltaMode: number): number {
   return clampI16(delta * scale);
 }
 
-export function attachInput(canvas: HTMLCanvasElement, viewer: Viewer, connection: InputSink): void {
+export function attachInput(
+  canvas: HTMLCanvasElement,
+  viewer: Viewer,
+  connection: InputSink,
+  pasteFlow?: PasteFlow,
+): void {
   const point = (e: { clientX: number; clientY: number }) =>
     normalizedFromClient(e.clientX, e.clientY, viewer.displayedRect());
 
@@ -96,6 +102,13 @@ export function attachInput(canvas: HTMLCanvasElement, viewer: Viewer, connectio
   );
 
   canvas.addEventListener("keydown", (e) => {
+    // Cmd/Ctrl+V: don't forward and don't preventDefault — the default paste
+    // action produces the `paste` event the clipboard sync harvests; the V
+    // tap is sent by the PasteFlow afterwards, in order.
+    if (pasteFlow && e.code === "KeyV" && (e.metaKey || e.ctrlKey)) {
+      pasteFlow.onPasteCombo(modifierMask(e));
+      return;
+    }
     // Auto-repeat keydowns are forwarded: synthetic held keys don't repeat
     // on the host, so the browser's repeat stream stands in for it.
     connection.sendInput({ type: "input", kind: "keydown", code: e.code, modifiers: modifierMask(e) });
@@ -103,9 +116,22 @@ export function attachInput(canvas: HTMLCanvasElement, viewer: Viewer, connectio
   });
 
   canvas.addEventListener("keyup", (e) => {
+    if (pasteFlow && e.code === "KeyV" && pasteFlow.onPasteKeyUp()) {
+      e.preventDefault();
+      return; // the flow already sent the full tap
+    }
     connection.sendInput({ type: "input", kind: "keyup", code: e.code, modifiers: modifierMask(e) });
     e.preventDefault();
   });
+
+  if (pasteFlow) {
+    window.addEventListener("paste", (e) => {
+      const text = e.clipboardData?.getData("text/plain") || null;
+      if (pasteFlow.onPasteEvent(text)) {
+        e.preventDefault(); // consumed by the remote session, not the page
+      }
+    });
+  }
 
   // If the canvas loses focus mid-combo (cmd+tab away), release whatever the
   // host might still think is held to avoid stuck modifiers.

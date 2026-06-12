@@ -17,6 +17,7 @@ function makeSession() {
     onConnected: vi.fn(),
     onResolution: vi.fn(),
     onFrame: vi.fn(),
+    onClipboard: vi.fn(),
     onProtocolError: vi.fn(),
   } satisfies SessionEvents;
   const session = new ProtocolSession(events, (b) => sent.push(b));

@@ -1,3 +1,4 @@
+import { HostClipboard, PasteFlow } from "./clipboard";
 import { TetherConnection, type ConnectionEvents, type Transport } from "./connection";
 import { attachInput } from "./input";
 import { Viewer } from "./viewer";
@@ -23,6 +24,7 @@ function setup(): void {
         <input id="target" type="text" placeholder="host device id" spellcheck="false" />
       </span>
       <button id="connect">Connect</button>
+      <button id="clip" hidden title="Copy host clipboard to this device">📋</button>
       <span id="stats"></span>
     </div>
     <div id="stage"><canvas id="view" tabindex="0"></canvas></div>
@@ -66,7 +68,26 @@ function setup(): void {
     onFrame(f) {
       viewer.onFrame(f);
     },
+    onClipboard(text) {
+      void hostClipboard.receive(text);
+    },
   };
+
+  const clipBtn = $<HTMLButtonElement>("#clip");
+  const hostClipboard = new HostClipboard((visible) => {
+    clipBtn.hidden = !visible;
+  });
+  clipBtn.addEventListener("click", () => {
+    void hostClipboard.copyNow().then(() => canvas.focus());
+  });
+
+  const pasteFlow = new PasteFlow({
+    sendClipboard: (text) => active?.sendClipboard(text),
+    sendKeyTap: (code, modifiers) => {
+      active?.sendInput({ type: "input", kind: "keydown", code, modifiers });
+      active?.sendInput({ type: "input", kind: "keyup", code, modifiers });
+    },
+  });
 
   // device id for signaling: stable per browser, no setup required
   const deviceId =
@@ -94,9 +115,12 @@ function setup(): void {
   }
 
   // input events route to whatever transport is currently active
-  attachInput(canvas, viewer, {
-    sendInput: (ev) => active?.sendInput(ev),
-  });
+  attachInput(
+    canvas,
+    viewer,
+    { sendInput: (ev) => active?.sendInput(ev) },
+    pasteFlow,
+  );
 
   // field persistence + ?host= / ?mode= shortcuts
   const params = new URLSearchParams(location.search);

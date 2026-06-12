@@ -10,12 +10,14 @@ export interface ConnectionEvents {
   onStatus(status: ConnectionStatus, detail?: string): void;
   onResolution(resolution: Resolution): void;
   onFrame(frame: FrameData): void;
+  onClipboard(text: string): void;
 }
 
 /** Common shape of all transports (WS today, WebRTC in webrtc.ts). */
 export interface Transport {
   close(): void;
   sendInput(ev: InputEvent): void;
+  sendClipboard(text: string): void;
   readonly connected: boolean;
 }
 
@@ -44,6 +46,7 @@ export class TetherConnection implements Transport {
         onConnected: () => this.events.onStatus("connected"),
         onResolution: (r) => this.events.onResolution(r),
         onFrame: (f) => this.events.onFrame(f),
+        onClipboard: (text) => this.events.onClipboard(text),
         onProtocolError: (detail) => this.fail(detail),
       },
       (bytes) => {
@@ -70,6 +73,10 @@ export class TetherConnection implements Transport {
 
   sendInput(ev: InputEvent): void {
     this.session?.sendInput(ev);
+  }
+
+  sendClipboard(text: string): void {
+    this.session?.sendClipboard(text);
   }
 
   close(): void {

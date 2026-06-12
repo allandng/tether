@@ -10,6 +10,7 @@ import {
   PROTOCOL_VERSION,
   Role,
   decodeMessage,
+  encodeClipboardData,
   encodeHello,
   encodeInputEvent,
 } from "./protocol";
@@ -18,6 +19,7 @@ export interface SessionEvents {
   onConnected(): void;
   onResolution(resolution: Resolution): void;
   onFrame(frame: FrameData): void;
+  onClipboard(text: string): void;
   /** Protocol-level failure; the caller should tear down the transport. */
   onProtocolError(detail: string): void;
 }
@@ -52,6 +54,12 @@ export class ProtocolSession {
     }
   }
 
+  sendClipboard(text: string): void {
+    if (this.handshaken) {
+      this.sendBytes(encodeClipboardData({ text }));
+    }
+  }
+
   /** Feed one complete wire message from the transport. */
   onMessage(data: ArrayBuffer | Uint8Array): void {
     const result = decodeMessage(data);
@@ -80,6 +88,9 @@ export class ProtocolSession {
         break;
       case "frame":
         this.events.onFrame(message);
+        break;
+      case "clipboard":
+        this.events.onClipboard(message.text);
         break;
       default:
         console.warn("unexpected message from host:", message.type);

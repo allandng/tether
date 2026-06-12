@@ -48,6 +48,7 @@ export class WebRtcTransport implements Transport {
         onConnected: () => this.events.onStatus("connected"),
         onResolution: (r) => this.events.onResolution(r),
         onFrame: (f) => this.events.onFrame(f),
+        onClipboard: (text) => this.events.onClipboard(text),
         onProtocolError: (detail) => this.fail(detail),
       },
       (bytes) => {
@@ -142,6 +143,10 @@ export class WebRtcTransport implements Transport {
 
   sendInput(ev: InputEvent): void {
     this.session?.sendInput(ev);
+  }
+
+  sendClipboard(text: string): void {
+    this.session?.sendClipboard(text);
   }
 
   close(): void {
