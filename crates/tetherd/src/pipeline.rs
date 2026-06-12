@@ -10,14 +10,21 @@ pub struct Pipeline {
     pub frames: watch::Receiver<Option<EncodedFrame>>,
 }
 
+/// How long to wait between capturer construction attempts when the failure
+/// is transient (display asleep / screen locked).
+const DISPLAY_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Start the capture→encode loop on a dedicated thread.
 ///
 /// Capturer and encoder are *built inside* the thread (platform handles are
-/// not generally `Send`); construction errors are reported synchronously so a
-/// missing Screen Recording permission fails daemon startup instead of
-/// producing a silent black stream.
+/// not generally `Send`). Hard construction errors (e.g. missing Screen
+/// Recording permission) are reported synchronously and fail daemon startup;
+/// a transient [`NoDisplays`](crate::capture::macos::NoDisplays) condition
+/// instead reports success and retries in the background — the daemon must
+/// stay reachable while the display sleeps, because an incoming controller's
+/// input is what wakes it.
 pub fn start<C, E>(
-    make_capturer: impl FnOnce() -> anyhow::Result<C> + Send + 'static,
+    mut make_capturer: impl FnMut() -> anyhow::Result<C> + Send + 'static,
     make_encoder: impl FnOnce() -> anyhow::Result<E> + Send + 'static,
 ) -> anyhow::Result<Pipeline>
 where
@@ -31,13 +38,6 @@ where
     std::thread::Builder::new()
         .name("tether-capture".into())
         .spawn(move || {
-            let mut capturer = match make_capturer() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = init_tx.send(Err(e));
-                    return;
-                }
-            };
             let mut encoder = match make_encoder() {
                 Ok(e) => e,
                 Err(e) => {
@@ -45,7 +45,33 @@ where
                     return;
                 }
             };
-            let _ = init_tx.send(Ok(()));
+            let mut capturer = match make_capturer() {
+                Ok(c) => {
+                    let _ = init_tx.send(Ok(()));
+                    c
+                }
+                Err(e) if is_transient(&e) => {
+                    info!("no display yet ({e}); will keep retrying in the background");
+                    let _ = init_tx.send(Ok(()));
+                    let mut attempts: u32 = 0;
+                    loop {
+                        std::thread::sleep(DISPLAY_RETRY);
+                        match make_capturer() {
+                            Ok(c) => break c,
+                            Err(e) => {
+                                attempts += 1;
+                                if attempts % 20 == 0 {
+                                    warn!(error = %e, "still waiting for a display to capture");
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = init_tx.send(Err(e));
+                    return;
+                }
+            };
 
             let mut resolution = capturer.resolution();
             let _ = resolution_tx.send(resolution);
@@ -88,6 +114,16 @@ where
         .recv()
         .map_err(|_| anyhow::anyhow!("capture thread died during startup"))??;
     Ok(Pipeline { resolution: resolution_rx, frames: frames_rx })
+}
+
+#[cfg(target_os = "macos")]
+fn is_transient(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::capture::macos::NoDisplays>().is_some()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_transient(_: &anyhow::Error) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -166,5 +202,38 @@ mod tests {
         );
         let err = result.err().expect("startup must fail");
         assert!(err.to_string().contains("no permission"));
+    }
+
+    /// Display asleep at startup: the daemon must come up anyway and start
+    /// streaming once a display appears.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn no_displays_at_startup_retries_in_background() {
+        use crate::capture::macos::NoDisplays;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+        ATTEMPTS.store(0, Ordering::SeqCst);
+
+        let pipeline = start(
+            || {
+                if ATTEMPTS.fetch_add(1, Ordering::SeqCst) < 1 {
+                    Err(anyhow::Error::new(NoDisplays))
+                } else {
+                    Ok(FakeCapturer { frames_left: 3 })
+                }
+            },
+            || Ok(FakeEncoder),
+        )
+        .expect("transient no-displays must not fail startup");
+
+        let mut frames = pipeline.frames.clone();
+        // First retry happens after DISPLAY_RETRY (3s); allow some slack.
+        tokio::time::timeout(std::time::Duration::from_secs(10), frames.changed())
+            .await
+            .expect("no frame within retry window")
+            .unwrap();
+        assert!(frames.borrow_and_update().is_some());
+        assert!(ATTEMPTS.load(Ordering::SeqCst) >= 2);
     }
 }

@@ -26,6 +26,37 @@ use super::InputInjector;
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_SLOP_POINTS: f64 = 5.0;
 
+/// Synthetic CGEvents are not "user activity" to the power system, so they
+/// don't wake a sleeping display — but waking the screen is exactly what a
+/// remote controller's first input should do. IOPMAssertionDeclareUserActivity
+/// is the supported way to say "a user did something."
+mod user_activity {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    // SAFETY contract: IOPMAssertionDeclareUserActivity (IOKit/pwr_mgt) takes
+    // a CFStringRef name, an IOPMUserActiveType (0 = local user), and an out
+    // assertion id; it is safe to call from any thread.
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPMAssertionDeclareUserActivity(
+            name: core_foundation::string::CFStringRef,
+            user_type: u32,
+            assertion_id: *mut u32,
+        ) -> i32;
+    }
+
+    pub fn declare() {
+        let name = CFString::new("tether remote input");
+        let mut id: u32 = 0;
+        // SAFETY: see the extern block contract; `name` outlives the call and
+        // `id` is a valid out-pointer.
+        unsafe {
+            IOPMAssertionDeclareUserActivity(name.as_concrete_TypeRef(), 0, &mut id);
+        }
+    }
+}
+
 pub struct MacInjector {
     source: CGEventSource,
     bounds: CGRect, // main display, in points
@@ -34,6 +65,7 @@ pub struct MacInjector {
     flags: CGEventFlags,
     last_click: Option<(Instant, CGPoint, MouseButton)>,
     click_state: i64,
+    last_activity: Option<Instant>,
 }
 
 impl MacInjector {
@@ -52,7 +84,20 @@ impl MacInjector {
             flags: CGEventFlags::CGEventFlagNull,
             last_click: None,
             click_state: 1,
+            last_activity: None,
         })
+    }
+
+    /// Declare user activity (wakes a sleeping display), at most every few
+    /// seconds while input flows.
+    fn declare_activity(&mut self) {
+        let due = self
+            .last_activity
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(5));
+        if due {
+            user_activity::declare();
+            self.last_activity = Some(Instant::now());
+        }
     }
 
     fn post_mouse(&self, event_type: CGEventType, button: CGMouseButton) -> anyhow::Result<()> {
@@ -94,6 +139,7 @@ impl MacInjector {
 
 impl InputInjector for MacInjector {
     fn inject(&mut self, event: &InputEvent) -> anyhow::Result<()> {
+        self.declare_activity();
         match *event {
             InputEvent::MouseMove { x, y } => {
                 self.pos = normalized_to_point(&self.bounds, x, y);

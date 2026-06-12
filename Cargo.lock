@@ -2350,6 +2350,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "core-foundation",
  "core-graphics",
  "futures-util",
  "gethostname",

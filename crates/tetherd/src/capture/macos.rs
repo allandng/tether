@@ -18,6 +18,21 @@ use tracing::{debug, warn};
 
 use super::{RawFrame, ScreenCapturer};
 
+/// The display list is empty — display asleep, screen locked, or clamshell.
+/// Transient by nature: callers should retry rather than die, so that the
+/// daemon is reachable while the machine's display sleeps (connecting and
+/// injecting input is how a remote controller *wakes* it).
+#[derive(Debug)]
+pub struct NoDisplays;
+
+impl std::fmt::Display for NoDisplays {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no displays available to capture (display asleep or screen locked)")
+    }
+}
+
+impl std::error::Error for NoDisplays {}
+
 struct ChannelOutput {
     tx: SyncSender<RawFrame>,
 }
@@ -70,7 +85,7 @@ impl SckCapturer {
             .iter()
             .find(|d| d.display_id() == main_id)
             .or_else(|| displays.first())
-            .context("no displays available to capture")?;
+            .ok_or(anyhow::Error::new(NoDisplays))?;
 
         // SCDisplay (and CGDisplayPixelsWide, despite the name) report the
         // scaled mode's logical size; the display *mode* carries the true
