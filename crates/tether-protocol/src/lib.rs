@@ -26,11 +26,16 @@ pub const MAX_MESSAGE_LEN: u32 = 64 * 1024 * 1024;
 /// short; anything longer is corrupt).
 pub const MAX_KEY_CODE_LEN: usize = 32;
 
+/// Clipboard payloads above this are refused (never silently truncated):
+/// clipboard rides the ordered control channel and must not stall input.
+pub const MAX_CLIPBOARD_LEN: usize = 256 * 1024;
+
 mod msg_type {
     pub const HELLO: u8 = 0x01;
     pub const RESOLUTION: u8 = 0x02;
     pub const FRAME_DATA: u8 = 0x03;
     pub const INPUT_EVENT: u8 = 0x04;
+    pub const CLIPBOARD_DATA: u8 = 0x05;
 }
 
 /// Capability bit: this peer can be controlled (host path exists).
@@ -145,12 +150,24 @@ mod input_kind {
     pub const KEY_UP: u8 = 5;
 }
 
+/// Clipboard content, either direction. Text-only for now; the kind byte on
+/// the wire reserves room for images/files without a protocol version bump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardData {
+    pub text: String,
+}
+
+mod clipboard_kind {
+    pub const TEXT: u8 = 0;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Hello(Hello),
     Resolution(Resolution),
     FrameData(FrameData),
     InputEvent(InputEvent),
+    ClipboardData(ClipboardData),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -208,6 +225,12 @@ impl Message {
                 buf.put_u8(msg_type::INPUT_EVENT);
                 encode_input_event(&mut buf, ev);
             }
+            Message::ClipboardData(c) => {
+                debug_assert!(c.text.len() <= MAX_CLIPBOARD_LEN);
+                buf.put_u8(msg_type::CLIPBOARD_DATA);
+                buf.put_u8(clipboard_kind::TEXT);
+                buf.put_slice(c.text.as_bytes());
+            }
         }
         let total_len = (buf.len() - 4) as u32;
         buf[0..4].copy_from_slice(&total_len.to_le_bytes());
@@ -244,6 +267,7 @@ impl Message {
             msg_type::RESOLUTION => Message::Resolution(decode_resolution(payload, msg_type)?),
             msg_type::FRAME_DATA => Message::FrameData(decode_frame_data(payload, msg_type)?),
             msg_type::INPUT_EVENT => Message::InputEvent(decode_input_event(payload, msg_type)?),
+            msg_type::CLIPBOARD_DATA => Message::ClipboardData(decode_clipboard(payload, msg_type)?),
             other => return Ok(Decoded::Unknown { msg_type: other, consumed }),
         };
         Ok(Decoded::Message { message, consumed })
@@ -342,6 +366,23 @@ fn decode_key(p: &[u8], t: u8) -> Result<(String, u8), DecodeError> {
         .map_err(|_| DecodeError::BadKeyCode)?
         .to_owned();
     Ok((code, modifiers))
+}
+
+fn decode_clipboard(p: &[u8], t: u8) -> Result<ClipboardData, DecodeError> {
+    if p.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    if p[0] != clipboard_kind::TEXT {
+        return Err(DecodeError::InvalidValue("clipboard kind"));
+    }
+    let body = &p[1..];
+    if body.len() > MAX_CLIPBOARD_LEN {
+        return Err(DecodeError::InvalidValue("clipboard too large"));
+    }
+    let text = std::str::from_utf8(body)
+        .map_err(|_| DecodeError::InvalidValue("clipboard not UTF-8"))?
+        .to_owned();
+    Ok(ClipboardData { text })
 }
 
 fn decode_input_event(p: &[u8], t: u8) -> Result<InputEvent, DecodeError> {
@@ -451,6 +492,8 @@ mod tests {
                 modifiers: modifiers::SHIFT | modifiers::META,
             }),
             Message::InputEvent(InputEvent::KeyUp { code: "MetaLeft".into(), modifiers: 0 }),
+            Message::ClipboardData(ClipboardData { text: "héllo 📋".into() }),
+            Message::ClipboardData(ClipboardData { text: String::new() }),
         ]
     }
 
@@ -590,6 +633,41 @@ mod tests {
 
         let mouse = Message::InputEvent(InputEvent::MouseMove { x: 0, y: 65535 });
         assert_eq!(&mouse.encode()[..], &[6, 0, 0, 0, 0x04, 0, 0, 0, 0xFF, 0xFF]);
+
+        let clipboard = Message::ClipboardData(ClipboardData { text: "hi".into() });
+        assert_eq!(&clipboard.encode()[..], &[4, 0, 0, 0, 0x05, 0x00, 0x68, 0x69]);
+    }
+
+    #[test]
+    fn clipboard_rejects_bad_kind_oversize_and_non_utf8() {
+        let mut bad_kind = BytesMut::new();
+        bad_kind.put_u32_le(2);
+        bad_kind.put_u8(msg_type::CLIPBOARD_DATA);
+        bad_kind.put_u8(7); // unknown kind
+        assert_eq!(
+            Message::decode(&bad_kind),
+            Err(DecodeError::InvalidValue("clipboard kind"))
+        );
+
+        let mut huge = BytesMut::new();
+        huge.put_u32_le(2 + MAX_CLIPBOARD_LEN as u32 + 1);
+        huge.put_u8(msg_type::CLIPBOARD_DATA);
+        huge.put_u8(0);
+        huge.put_slice(&vec![b'a'; MAX_CLIPBOARD_LEN + 1]);
+        assert_eq!(
+            Message::decode(&huge),
+            Err(DecodeError::InvalidValue("clipboard too large"))
+        );
+
+        let mut bad_utf8 = BytesMut::new();
+        bad_utf8.put_u32_le(4);
+        bad_utf8.put_u8(msg_type::CLIPBOARD_DATA);
+        bad_utf8.put_u8(0);
+        bad_utf8.put_slice(&[0xFF, 0xFE]);
+        assert_eq!(
+            Message::decode(&bad_utf8),
+            Err(DecodeError::InvalidValue("clipboard not UTF-8"))
+        );
     }
 
     #[test]

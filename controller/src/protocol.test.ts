@@ -32,6 +32,8 @@ describe("round trips", () => {
     { type: "input", kind: "scroll", dx: -120, dy: 240 },
     { type: "input", kind: "keydown", code: "KeyA", modifiers: 0b1001 },
     { type: "input", kind: "keyup", code: "MetaLeft", modifiers: 0 },
+    { type: "clipboard", text: "héllo 📋" },
+    { type: "clipboard", text: "" },
   ];
   for (const message of cases) {
     it(JSON.stringify(message.type === "input" ? message.kind : message.type), () => {
@@ -107,6 +109,11 @@ describe("cross-implementation byte vectors (pin the wire format)", () => {
     const wire = encodeMessage({ type: "input", kind: "mousemove", x: 0, y: 65535 });
     expect(Array.from(wire)).toEqual([6, 0, 0, 0, 0x04, 0, 0, 0, 0xff, 0xff]);
   });
+
+  it("ClipboardData", () => {
+    const wire = encodeMessage({ type: "clipboard", text: "hi" });
+    expect(Array.from(wire)).toEqual([4, 0, 0, 0, 0x05, 0x00, 0x68, 0x69]);
+  });
 });
 
 describe("rejects corrupt input", () => {
@@ -134,5 +141,15 @@ describe("rejects corrupt input", () => {
     expect(() =>
       encodeMessage({ type: "input", kind: "keydown", code: "x".repeat(40), modifiers: 0 }),
     ).toThrow();
+  });
+
+  it("oversized clipboard refused on encode and decode", () => {
+    expect(() =>
+      encodeMessage({ type: "clipboard", text: "x".repeat(256 * 1024 + 1) }),
+    ).toThrow();
+    expect(decodeMessage(new Uint8Array([2, 0, 0, 0, 0x05, 9]))).toMatchObject({
+      ok: false,
+      reason: "corrupt", // unknown clipboard kind
+    });
   });
 });

@@ -125,6 +125,21 @@ the modifier key down for as long as the controller does.
 **modifiers** bitmask (informational; redundant with modifier key events):
 bit 0 shift, bit 1 ctrl, bit 2 alt/option, bit 3 meta/cmd.
 
+### 0x05 — ClipboardData (both directions)
+
+```
+0  u8  kind     0 = UTF-8 text (only kind defined; others reserved for
+                images/files — receivers reject unknown kinds)
+1  …   payload  the text, ≤ 262144 bytes (256 KiB)
+```
+
+Oversized content must be refused by sender and receiver, never truncated.
+Clipboard rides the ordered control path; receivers should apply it before
+processing any input event that arrives after it (this ordering is what makes
+"sync clipboard, then press Cmd+V" paste the right thing). Loop prevention is
+the application's job: don't re-send content identical to what was last
+applied or sent.
+
 ## WebRTC transport mapping (Phase 2)
 
 Two data channels, both carrying the wire format above unchanged:

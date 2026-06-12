@@ -5,6 +5,7 @@
 export const PROTOCOL_VERSION = 1;
 export const MAX_MESSAGE_LEN = 64 * 1024 * 1024;
 export const MAX_KEY_CODE_LEN = 32;
+export const MAX_CLIPBOARD_LEN = 256 * 1024;
 
 export const CAP_CAN_HOST = 0b01;
 export const CAP_CAN_CONTROL = 0b10;
@@ -29,6 +30,11 @@ const enum MsgType {
   Resolution = 0x02,
   FrameData = 0x03,
   InputEvent = 0x04,
+  ClipboardData = 0x05,
+}
+
+const enum ClipboardKind {
+  Text = 0,
 }
 
 const enum InputKind {
@@ -70,7 +76,12 @@ export type InputEvent =
   | { type: "input"; kind: "keydown"; code: string; modifiers: number }
   | { type: "input"; kind: "keyup"; code: string; modifiers: number };
 
-export type Message = Hello | Resolution | FrameData | InputEvent;
+export interface ClipboardData {
+  type: "clipboard";
+  text: string;
+}
+
+export type Message = Hello | Resolution | FrameData | InputEvent | ClipboardData;
 
 export type DecodeResult =
   | { ok: true; message: Message }
@@ -170,6 +181,22 @@ export function encodeInputEvent(ev: InputEvent): Uint8Array {
   }
 }
 
+export function encodeClipboardData(c: Omit<ClipboardData, "type">): Uint8Array {
+  const text = textEncoder.encode(c.text);
+  if (text.length > MAX_CLIPBOARD_LEN) {
+    throw new Error(`clipboard too large: ${text.length} bytes`);
+  }
+  return finish(
+    (view, bytes) => {
+      view.setUint8(4, MsgType.ClipboardData);
+      view.setUint8(5, ClipboardKind.Text);
+      bytes.set(text, 6);
+      return 2 + text.length;
+    },
+    2 + text.length,
+  );
+}
+
 export function encodeMessage(m: Message): Uint8Array {
   switch (m.type) {
     case "hello":
@@ -180,6 +207,8 @@ export function encodeMessage(m: Message): Uint8Array {
       return encodeFrameData(m);
     case "input":
       return encodeInputEvent(m);
+    case "clipboard":
+      return encodeClipboardData(m);
   }
 }
 
@@ -233,6 +262,18 @@ export function decodeMessage(data: ArrayBuffer | Uint8Array): DecodeResult {
     }
     case MsgType.InputEvent:
       return decodeInputEvent(view, bytes, payloadLen);
+    case MsgType.ClipboardData: {
+      if (payloadLen < 1) return corrupt("empty ClipboardData");
+      if (view.getUint8(5) !== ClipboardKind.Text) return corrupt("bad clipboard kind");
+      if (payloadLen - 1 > MAX_CLIPBOARD_LEN) return corrupt("clipboard too large");
+      let text: string;
+      try {
+        text = textDecoder.decode(bytes.subarray(6));
+      } catch {
+        return corrupt("clipboard not UTF-8");
+      }
+      return ok({ type: "clipboard", text });
+    }
     default:
       return { ok: false, reason: "unknown-type", msgType };
   }
