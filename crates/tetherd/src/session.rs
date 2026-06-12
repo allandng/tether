@@ -101,33 +101,37 @@ async fn handle_incoming(bytes: &[u8], state: &ServerState) {
     }
 }
 
+/// Shared by both transports (WS here, data channel in webrtc.rs).
+pub fn validate_controller_hello(hello: &Hello) -> Result<(), String> {
+    if hello.version != PROTOCOL_VERSION {
+        return Err(format!(
+            "protocol version mismatch: controller speaks v{}, host speaks v{PROTOCOL_VERSION}",
+            hello.version
+        ));
+    }
+    if hello.role != Role::Controller {
+        return Err(format!("peer Hello has role {:?}, expected Controller", hello.role));
+    }
+    if hello.capabilities & CAP_CAN_CONTROL == 0 {
+        return Err("peer lacks can_control capability".into());
+    }
+    Ok(())
+}
+
+pub fn host_hello() -> Message {
+    Message::Hello(Hello {
+        version: PROTOCOL_VERSION,
+        role: Role::Host,
+        capabilities: CAP_CAN_HOST | CAP_CAN_CONTROL,
+    })
+}
+
 async fn handshake(ws: &mut Ws) -> anyhow::Result<Hello> {
     let hello = timeout(HANDSHAKE_TIMEOUT, read_hello(ws))
         .await
         .context("handshake timed out")??;
-
-    if hello.version != PROTOCOL_VERSION {
-        bail!(
-            "protocol version mismatch: controller speaks v{}, host speaks v{PROTOCOL_VERSION}",
-            hello.version
-        );
-    }
-    if hello.role != Role::Controller {
-        bail!("peer Hello has role {:?}, expected Controller", hello.role);
-    }
-    if hello.capabilities & CAP_CAN_CONTROL == 0 {
-        bail!("peer lacks can_control capability");
-    }
-
-    send(
-        ws,
-        &Message::Hello(Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Host,
-            capabilities: CAP_CAN_HOST | CAP_CAN_CONTROL,
-        }),
-    )
-    .await?;
+    validate_controller_hello(&hello).map_err(anyhow::Error::msg)?;
+    send(ws, &host_hello()).await?;
     Ok(hello)
 }
 

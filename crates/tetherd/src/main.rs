@@ -14,25 +14,55 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    args.validate().map_err(anyhow::Error::msg)?;
 
     let pipeline = start_capture()?;
     let (input_tx, input_rx) = mpsc::channel(256);
     start_injector(input_rx);
 
-    let server = Server::bind(
-        args.bind,
-        args.port,
-        args.allow.clone(),
-        ServerState {
-            resolution: pipeline.resolution,
-            frames: pipeline.frames,
-            input_tx,
-        },
-    )
-    .await?;
+    let state = ServerState {
+        resolution: pipeline.resolution,
+        frames: pipeline.frames,
+        input_tx,
+    };
+
+    let lan = match args.bind {
+        Some(bind) => {
+            let server = Server::bind(bind, args.port, args.allow.clone(), state.clone()).await?;
+            Some(tokio::spawn(server.run()))
+        }
+        None => None,
+    };
+
+    let rtc = match args.signal_url() {
+        Some(signal_url) => {
+            let device_id = args.device_id.clone().unwrap_or_else(|| {
+                gethostname::gethostname().to_string_lossy().into_owned()
+            });
+            info!(%device_id, %signal_url, "webrtc transport enabled");
+            let config = tetherd::webrtc::RtcConfig {
+                signal_url,
+                secret: args.secret.clone().expect("validated"),
+                device_name: device_id.clone(),
+                device_id,
+                stun: args.stun.clone(),
+            };
+            Some(tokio::spawn(tetherd::webrtc::run_host(config, state)))
+        }
+        None => None,
+    };
+
+    let transports = async {
+        match (lan, rtc) {
+            (Some(l), Some(r)) => tokio::select! { res = l => res?, res = r => res? },
+            (Some(l), None) => l.await?,
+            (None, Some(r)) => r.await?,
+            (None, None) => unreachable!("validated"),
+        }
+    };
 
     tokio::select! {
-        result = server.run() => result,
+        result = transports => result,
         _ = tokio::signal::ctrl_c() => {
             info!("shutting down");
             Ok(())

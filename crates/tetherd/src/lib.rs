@@ -8,3 +8,4 @@ pub mod input;
 pub mod pipeline;
 pub mod server;
 pub mod session;
+pub mod webrtc;

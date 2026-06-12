@@ -11,10 +11,18 @@ bytes.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 futures-util = "0.3.32"
+gethostname = "1.1.0"
 screencapturekit = "7.0.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 tether-protocol.workspace = true
+tether-signal = { version = "0.1.0", path = "../tether-signal" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tokio-tungstenite = "0.29.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 turbojpeg = "1.4.0"
+webrtc = "0.17.1"
+
+[dev-dependencies]
+axum = "0.8.9"
