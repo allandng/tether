@@ -114,6 +114,8 @@ function setup(): void {
   localStorage.setItem("tether-device-id", deviceId);
 
   function startTransport(): void {
+    // release any held button on the still-open transport before swapping
+    input?.cancelGesture();
     active?.close();
     if (modeSelect.value === "lan") {
       const t = new TetherConnection(events);
@@ -217,6 +219,7 @@ function setup(): void {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      input?.cancelGesture(); // release any held button on the open transport
       active?.close();
       active = null;
       dot.className = "closed";

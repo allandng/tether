@@ -134,6 +134,9 @@ export class GestureMachine {
   }
 
   setMode(mode: Mode): void {
+    // Don't swap coordinate spaces mid-gesture: a HoldDrag anchored in finger
+    // space would teleport to the stale virtual cursor. Defer until idle.
+    if (this.state !== State.Idle) return;
     this.mode = mode;
   }
 
@@ -142,6 +145,10 @@ export class GestureMachine {
   }
 
   reset(): void {
+    // Never leave a button stuck or a pinch uncommitted on an abrupt reset
+    // (transport teardown, reconfigure) — mirror onCancel.
+    this.releaseHeld();
+    if (this.state === State.TwoPinch) this.sink.zoomEnd();
     this.state = State.Idle;
     this.pointers.clear();
     this.order = [];
@@ -153,12 +160,18 @@ export class GestureMachine {
     this.pointers.set(id, { startX: x, startY: y, startT: t, x, y, maxDist: 0 });
     this.order.push(id);
 
-    if (this.pointers.size === 2 && this.canBecomeTwoFinger()) {
-      this.beginTwoFinger();
+    if (this.pointers.size >= 2) {
+      if (this.canBecomeTwoFinger()) {
+        this.beginTwoFinger();
+        return this.deadline();
+      }
+      // A finger landed in a state that can't pair up (HoldDrag, or already
+      // 3+ fingers). Release any held button so it can't get stuck, and route
+      // to draining rather than restarting as a fresh single-finger gesture.
+      this.releaseHeld();
+      this.state = State.TwoDraining;
+      this.longPressDeadline = null;
       return this.deadline();
-    }
-    if (this.pointers.size > 2) {
-      return this.deadline(); // extra fingers ignored
     }
 
     // first finger down
@@ -181,6 +194,7 @@ export class GestureMachine {
       case State.PendingTap: {
         if (p && p.maxDist > this.t.tapSlopPx) {
           this.longPressDeadline = null;
+          this.lastTap = null; // a drag started — don't fuse a prior tap into a double
           this.state = State.Drag;
           this.advanceCursor(prevX, prevY, x, y);
           this.emitMove(p);
@@ -192,6 +206,7 @@ export class GestureMachine {
           // becomes a left-button hold+drag; no right-click was emitted.
           // Anchor the press at where the finger was held (touch) or the
           // virtual cursor (trackpad, unmoved during the hold), then drag.
+          this.lastTap = null;
           this.state = State.HoldDrag;
           const anchor = this.mode === "touch"
             ? { x: p.startX, y: p.startY }
@@ -228,22 +243,23 @@ export class GestureMachine {
 
   onUp(id: number, x: number, y: number, t: number): number | null {
     const p = this.pointers.get(id);
-    if (p) {
-      p.x = x;
-      p.y = y;
-      p.maxDist = Math.max(p.maxDist, dist(x, y, p.startX, p.startY));
-    }
+    if (!p) return this.deadline(); // unknown/already-removed id: never touch state
+    p.x = x;
+    p.y = y;
+    p.maxDist = Math.max(p.maxDist, dist(x, y, p.startX, p.startY));
 
     switch (this.state) {
       case State.PendingTap: {
         // tap if quick and under slop
-        if (p && t - p.startT <= this.t.tapMaxMs && p.maxDist <= this.t.tapSlopPx) {
-          this.emitTap(p, t);
-        } else if (p) {
-          // slow press that never moved and never fired long-press: treat as click
+        if (t - p.startT <= this.t.tapMaxMs && p.maxDist <= this.t.tapSlopPx) {
+          this.emitTap(p, t); // (re)sets lastTap
+        } else {
+          // slow press that never moved and never fired long-press: treat as a
+          // click, but not a tap that could fuse into a later double.
           const pt = this.movePoint(p);
           this.sink.moveAbs(pt.x, pt.y);
           this.sink.click(0);
+          this.lastTap = null;
         }
         this.endSingle(id);
         break;
@@ -299,9 +315,7 @@ export class GestureMachine {
   }
 
   onCancel(id: number): number | null {
-    if (this.state === State.HoldDrag) {
-      this.sink.up(0); // never leave a button stuck
-    }
+    this.releaseHeld(); // never leave a button stuck
     if (this.state === State.TwoPinch) this.sink.zoomEnd();
     this.removePointer(id);
     if (this.pointers.size === 0) this.toIdle();
@@ -319,6 +333,7 @@ export class GestureMachine {
       const p = this.firstPointer();
       if (p && p.maxDist <= this.t.tapSlopPx) {
         this.state = State.LongPressArmed; // defer the emit (see header)
+        this.lastTap = null; // a long-press, not a tap that could double
       }
       this.longPressDeadline = null;
     }
@@ -326,6 +341,11 @@ export class GestureMachine {
   }
 
   // ---- helpers ---------------------------------------------------------
+
+  /** Release a held left button if we're mid-hold-drag (idempotent). */
+  private releaseHeld(): void {
+    if (this.state === State.HoldDrag) this.sink.up(0);
+  }
 
   private deadline(): number | null {
     return this.state === State.PendingTap ? this.longPressDeadline : null;
@@ -402,12 +422,16 @@ export class GestureMachine {
     return (
       this.state === State.PendingTap ||
       this.state === State.LongPressArmed ||
-      this.state === State.Drag
+      this.state === State.Drag ||
+      // a finger re-landing during the drain phase resumes a two-finger
+      // episode rather than starting a fresh single-finger gesture
+      this.state === State.TwoDraining
     );
   }
 
   private beginTwoFinger(): void {
     this.longPressDeadline = null;
+    this.lastTap = null; // a two-finger gesture isn't a tap; don't fuse a later one
     this.state = State.TwoPending;
     const [a, b] = this.twoPointers();
     this.d0 = dist(a.x, a.y, b.x, b.y);

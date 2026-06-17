@@ -76,31 +76,60 @@ export class SoftKeyboard {
   }
 
   private onBeforeInput(e: InputEvent): void {
-    switch (e.inputType) {
-      case "insertText":
-      case "insertReplacementText":
-      case "insertFromComposition":
-      case "insertFromPaste": {
-        if (e.data) this.sink.sendText(e.data);
-        break;
+    // try/finally so a throw (e.g. an oversized paste in encodeTextInput)
+    // can never skip clearing the field — which would dismiss the keyboard.
+    try {
+      switch (e.inputType) {
+        case "insertText":
+        case "insertFromComposition":
+        case "insertFromPaste": {
+          if (e.data) this.sink.sendText(e.data);
+          break;
+        }
+        case "insertReplacementText": {
+          // Autocorrect/predictive replaces a RANGE of already-typed text on
+          // the host. We type-ahead character by character, so the original
+          // chars are already on the host — delete them before the replacement
+          // or it double-inserts ("teh" → "teh" + "the"). getTargetRanges()
+          // gives the exact span on iOS 17+; the field length is the fallback.
+          // NOTE: exact behavior needs real-device validation (see deferred.md).
+          const deleteCount = replacedLength(e) || this.input.value.length;
+          for (let i = 0; i < deleteCount; i++) this.sink.sendKeyTap("Backspace");
+          if (e.data) this.sink.sendText(e.data);
+          break;
+        }
+        case "deleteContentBackward":
+        case "deleteWordBackward":
+        case "deleteContent": {
+          this.sink.sendKeyTap("Backspace");
+          break;
+        }
+        case "insertLineBreak":
+        case "insertParagraph": {
+          this.sink.sendKeyTap("Enter");
+          break;
+        }
+        default:
+          break;
       }
-      case "deleteContentBackward":
-      case "deleteWordBackward":
-      case "deleteContent": {
-        this.sink.sendKeyTap("Backspace");
-        break;
-      }
-      case "insertLineBreak":
-      case "insertParagraph": {
-        this.sink.sendKeyTap("Enter");
-        break;
-      }
-      default:
-        break;
+    } catch (err) {
+      console.warn("soft-keyboard input dropped:", err);
+    } finally {
+      // Never let text accumulate in the field — keep it empty without blurring.
+      queueMicrotask(() => {
+        this.input.value = "";
+      });
     }
-    // Never let text accumulate in the field — keep it empty without blurring.
-    queueMicrotask(() => {
-      this.input.value = "";
-    });
   }
+}
+
+/** UTF-16 length of the range an insertReplacementText is about to overwrite,
+ * via getTargetRanges() when available (0 if it can't be determined). */
+function replacedLength(e: InputEvent): number {
+  const ranges = typeof e.getTargetRanges === "function" ? e.getTargetRanges() : [];
+  let count = 0;
+  for (const r of ranges) {
+    if (r.startContainer === r.endContainer) count += r.endOffset - r.startOffset;
+  }
+  return count;
 }

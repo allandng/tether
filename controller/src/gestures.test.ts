@@ -204,4 +204,55 @@ describe("safety", () => {
     m.onUp(1, 10, 10, LP + 200); // unknown pointer after reset
     expect(events).toEqual([]);
   });
+
+  // ---- regressions from the Phase 4 adversarial review --------------------
+
+  it("a 2nd finger during a hold-drag releases the button, no leak, no stray click", () => {
+    const { m, events } = harness("touch");
+    m.onDown(1, 200, 200, 0);
+    m.tick(LP); // long-press armed
+    m.onMove(1, 240, 200, LP + 40); // → HoldDrag: move, down(0), move
+    m.onDown(2, 400, 200, LP + 60); // 2nd finger lands mid-hold-drag
+    m.onUp(2, 400, 200, LP + 80);
+    m.onUp(1, 240, 200, LP + 100);
+    const downs = events.filter((e) => e === "down(0)").length;
+    const ups = events.filter((e) => e === "up(0)").length;
+    expect(downs).toBe(1);
+    expect(ups).toBe(1); // released, not leaked
+    expect(events).not.toContain("click(0)"); // no spurious tap
+  });
+
+  it("reset mid-hold-drag releases the held button", () => {
+    const { m, events } = harness("touch");
+    m.onDown(1, 200, 200, 0);
+    m.tick(LP);
+    m.onMove(1, 240, 200, LP + 40); // HoldDrag, down(0)
+    m.reset();
+    expect(events.filter((e) => e === "up(0)")).toEqual(["up(0)"]);
+  });
+
+  it("double-tap does NOT fuse across an intervening drag", () => {
+    const { m, events } = harness("touch");
+    // tap 1
+    m.onDown(1, 100, 100, 0);
+    m.onUp(1, 100, 100, 40);
+    // a quick drag (all still within doubleTapMs of tap 1)
+    m.onDown(1, 100, 100, 80);
+    m.onMove(1, 160, 100, 120); // → Drag, clears lastTap
+    m.onUp(1, 160, 100, 140);
+    // tap 2 near tap 1, still within the double-tap window
+    m.onDown(1, 102, 100, 180);
+    m.onUp(1, 102, 100, 210);
+    expect(events).not.toContain("dbl"); // the drag broke the pairing
+    expect(events.filter((e) => e === "click(0)").length).toBe(2);
+  });
+
+  it("onUp for an unknown pointer id is ignored (doesn't corrupt a live gesture)", () => {
+    const { m, events } = harness("touch");
+    m.onDown(1, 100, 100, 0); // a real finger is pending
+    m.onUp(99, 0, 0, 50); // stray up for a never-seen pointer
+    // the real finger's tap must still work
+    m.onUp(1, 100, 100, 60);
+    expect(events).toEqual(["move(100,100)", "click(0)"]);
+  });
 });

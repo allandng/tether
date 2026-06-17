@@ -73,7 +73,7 @@ export function attachInput(
   viewer: Viewer,
   connection: InputSink,
   options: InputOptions = {},
-): { setMode(mode: Mode): void } {
+): { setMode(mode: Mode): void; cancelGesture(): void } {
   const { pasteFlow, zoomSink } = options;
   const point = (e: { clientX: number; clientY: number }) =>
     normalizedFromClient(e.clientX, e.clientY, viewer.displayedRect());
@@ -237,5 +237,17 @@ export function attachInput(
     }
   });
 
-  return { setMode: (mode: Mode) => gestures.setMode(mode) };
+  return {
+    setMode: (mode: Mode) => gestures.setMode(mode),
+    /** Flush any in-flight gesture, releasing a held button on the CURRENT
+     * transport. Call before swapping/closing transports so a HoldDrag's
+     * mouseup can't be lost (which would leave the button stuck on the host). */
+    cancelGesture: () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      gestures.reset();
+    },
+  };
 }

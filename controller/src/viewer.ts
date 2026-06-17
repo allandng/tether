@@ -88,14 +88,42 @@ export class Viewer {
     }
   }
 
-  /** Pan can't expose empty space: clamp tx,ty so the scaled canvas covers the box. */
+  /**
+   * Pan can't expose empty space. Clamp against the *displayed content* rect
+   * (the letterboxed video inside the element box), not the element box — else
+   * a portrait phone showing a landscape desktop could pan into the black bars.
+   * Works in untransformed layout space (clientWidth/Height are transform-
+   * agnostic), mirroring the displayedRect aspect math.
+   */
   private clampPan(): void {
     if (this.scale === 1) return;
-    // clientWidth/Height are layout (transform-agnostic) → the untransformed box
-    const vw = this.canvas.clientWidth;
-    const vh = this.canvas.clientHeight;
-    const tx = clamp(this.tx, vw * (1 - this.scale), 0);
-    const ty = clamp(this.ty, vh * (1 - this.scale), 0);
+    const boxW = this.canvas.clientWidth;
+    const boxH = this.canvas.clientHeight;
+    const contentAspect = this.canvas.width / Math.max(1, this.canvas.height);
+    const boxAspect = boxW / Math.max(1, boxH);
+    let cw = boxW;
+    let ch = boxH;
+    let ox = 0;
+    let oy = 0;
+    if (boxAspect > contentAspect) {
+      cw = boxH * contentAspect; // pillarbox
+      ox = (boxW - cw) / 2;
+    } else {
+      ch = boxW / contentAspect; // letterbox
+      oy = (boxH - ch) / 2;
+    }
+    const clampAxis = (t: number, off: number, len: number, box: number) => {
+      const scaledOff = off * this.scale;
+      const scaledLen = len * this.scale;
+      if (scaledLen <= box) {
+        // content still smaller than the box on this axis → keep it centered
+        return (box - scaledLen) / 2 - scaledOff;
+      }
+      // content covers the box → keep its edges from crossing inward
+      return clamp(t, box - scaledOff - scaledLen, -scaledOff);
+    };
+    const tx = clampAxis(this.tx, ox, cw, boxW);
+    const ty = clampAxis(this.ty, oy, ch, boxH);
     this.setTransform(this.scale, tx, ty);
   }
 
