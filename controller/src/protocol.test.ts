@@ -34,9 +34,12 @@ describe("round trips", () => {
     { type: "input", kind: "keyup", code: "MetaLeft", modifiers: 0 },
     { type: "clipboard", text: "héllo 📋" },
     { type: "clipboard", text: "" },
+    { type: "text", text: "a" },
+    { type: "text", text: "señor 🎯" },
+    { type: "text", text: "" },
   ];
   for (const message of cases) {
-    it(JSON.stringify(message.type === "input" ? message.kind : message.type), () => {
+    it(JSON.stringify(message.type === "input" ? message.kind : `${message.type}:${"text" in message ? message.text : ""}`), () => {
       roundTrip(message);
     });
   }
@@ -114,6 +117,11 @@ describe("cross-implementation byte vectors (pin the wire format)", () => {
     const wire = encodeMessage({ type: "clipboard", text: "hi" });
     expect(Array.from(wire)).toEqual([4, 0, 0, 0, 0x05, 0x00, 0x68, 0x69]);
   });
+
+  it("TextInput", () => {
+    const wire = encodeMessage({ type: "text", text: "hi" });
+    expect(Array.from(wire)).toEqual([3, 0, 0, 0, 0x06, 0x68, 0x69]);
+  });
 });
 
 describe("rejects corrupt input", () => {
@@ -151,5 +159,9 @@ describe("rejects corrupt input", () => {
       ok: false,
       reason: "corrupt", // unknown clipboard kind
     });
+  });
+
+  it("oversized text input refused on encode", () => {
+    expect(() => encodeMessage({ type: "text", text: "x".repeat(1025) })).toThrow();
   });
 });

@@ -11,9 +11,10 @@ use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
     CAP_CAN_CONTROL, CAP_CAN_HOST, ClipboardData, Codec, Decoded, Hello, InputEvent, Message,
-    MouseButton, PROTOCOL_VERSION, Resolution, Role,
+    MouseButton, PROTOCOL_VERSION, Resolution, Role, TextInput,
 };
 use tetherd::capture::EncodedFrame;
+use tetherd::input::InjectCommand;
 use tetherd::server::{Server, ServerState};
 
 struct TestHost {
@@ -21,7 +22,7 @@ struct TestHost {
     frames_tx: watch::Sender<Option<EncodedFrame>>,
     #[allow(dead_code)]
     resolution_tx: watch::Sender<Resolution>,
-    input_rx: mpsc::Receiver<InputEvent>,
+    input_rx: mpsc::Receiver<InjectCommand>,
     clipboard_out_tx: watch::Sender<Option<String>>,
     clipboard_in_rx: std::sync::mpsc::Receiver<String>,
     server_task: tokio::task::JoinHandle<()>,
@@ -145,7 +146,22 @@ async fn handshake_then_frames_then_input() {
         .await
         .unwrap();
     let received = host.input_rx.recv().await.expect("input event");
-    assert_eq!(received, ev);
+    assert!(matches!(received, InjectCommand::Event(e) if e == ev));
+}
+
+#[tokio::test]
+async fn text_input_relays_to_injector() {
+    let mut host = start_host().await;
+    let mut ws = connect(host.addr).await;
+    handshake(&mut ws).await;
+
+    ws.send(WsMessage::Binary(
+        Message::TextInput(TextInput { text: "señor 🎯".into() }).encode(),
+    ))
+    .await
+    .unwrap();
+    let received = host.input_rx.recv().await.expect("text input");
+    assert!(matches!(received, InjectCommand::Text(t) if t == "señor 🎯"));
 }
 
 #[tokio::test]

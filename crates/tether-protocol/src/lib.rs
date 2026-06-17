@@ -30,12 +30,17 @@ pub const MAX_KEY_CODE_LEN: usize = 32;
 /// clipboard rides the ordered control channel and must not stall input.
 pub const MAX_CLIPBOARD_LEN: usize = 256 * 1024;
 
+/// Committed text from a soft keyboard is normally 1–3 chars; cap generously
+/// but bound it so a runaway paste can't masquerade as typed text.
+pub const MAX_TEXT_INPUT_LEN: usize = 1024;
+
 mod msg_type {
     pub const HELLO: u8 = 0x01;
     pub const RESOLUTION: u8 = 0x02;
     pub const FRAME_DATA: u8 = 0x03;
     pub const INPUT_EVENT: u8 = 0x04;
     pub const CLIPBOARD_DATA: u8 = 0x05;
+    pub const TEXT_INPUT: u8 = 0x06;
 }
 
 /// Capability bit: this peer can be controlled (host path exists).
@@ -161,6 +166,15 @@ mod clipboard_kind {
     pub const TEXT: u8 = 0;
 }
 
+/// Committed text from a controller's soft keyboard (controller → host). The
+/// host injects it as Unicode directly, bypassing the DOM-code → virtual-key
+/// path — which soft keyboards can't drive (no usable `KeyboardEvent.code`)
+/// and which can't express emoji or non-US layouts anyway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInput {
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Hello(Hello),
@@ -168,6 +182,7 @@ pub enum Message {
     FrameData(FrameData),
     InputEvent(InputEvent),
     ClipboardData(ClipboardData),
+    TextInput(TextInput),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -231,6 +246,11 @@ impl Message {
                 buf.put_u8(clipboard_kind::TEXT);
                 buf.put_slice(c.text.as_bytes());
             }
+            Message::TextInput(t) => {
+                debug_assert!(t.text.len() <= MAX_TEXT_INPUT_LEN);
+                buf.put_u8(msg_type::TEXT_INPUT);
+                buf.put_slice(t.text.as_bytes());
+            }
         }
         let total_len = (buf.len() - 4) as u32;
         buf[0..4].copy_from_slice(&total_len.to_le_bytes());
@@ -268,6 +288,7 @@ impl Message {
             msg_type::FRAME_DATA => Message::FrameData(decode_frame_data(payload, msg_type)?),
             msg_type::INPUT_EVENT => Message::InputEvent(decode_input_event(payload, msg_type)?),
             msg_type::CLIPBOARD_DATA => Message::ClipboardData(decode_clipboard(payload, msg_type)?),
+            msg_type::TEXT_INPUT => Message::TextInput(decode_text_input(payload)?),
             other => return Ok(Decoded::Unknown { msg_type: other, consumed }),
         };
         Ok(Decoded::Message { message, consumed })
@@ -385,6 +406,16 @@ fn decode_clipboard(p: &[u8], t: u8) -> Result<ClipboardData, DecodeError> {
     Ok(ClipboardData { text })
 }
 
+fn decode_text_input(p: &[u8]) -> Result<TextInput, DecodeError> {
+    if p.len() > MAX_TEXT_INPUT_LEN {
+        return Err(DecodeError::InvalidValue("text input too large"));
+    }
+    let text = std::str::from_utf8(p)
+        .map_err(|_| DecodeError::InvalidValue("text input not UTF-8"))?
+        .to_owned();
+    Ok(TextInput { text })
+}
+
 fn decode_input_event(p: &[u8], t: u8) -> Result<InputEvent, DecodeError> {
     if p.is_empty() {
         return Err(DecodeError::BadLength(t));
@@ -494,6 +525,9 @@ mod tests {
             Message::InputEvent(InputEvent::KeyUp { code: "MetaLeft".into(), modifiers: 0 }),
             Message::ClipboardData(ClipboardData { text: "héllo 📋".into() }),
             Message::ClipboardData(ClipboardData { text: String::new() }),
+            Message::TextInput(TextInput { text: "a".into() }),
+            Message::TextInput(TextInput { text: "señor 🎯".into() }),
+            Message::TextInput(TextInput { text: String::new() }),
         ]
     }
 
@@ -636,6 +670,30 @@ mod tests {
 
         let clipboard = Message::ClipboardData(ClipboardData { text: "hi".into() });
         assert_eq!(&clipboard.encode()[..], &[4, 0, 0, 0, 0x05, 0x00, 0x68, 0x69]);
+
+        let text = Message::TextInput(TextInput { text: "hi".into() });
+        assert_eq!(&text.encode()[..], &[3, 0, 0, 0, 0x06, 0x68, 0x69]);
+    }
+
+    #[test]
+    fn text_input_rejects_oversize_and_non_utf8() {
+        let mut huge = BytesMut::new();
+        huge.put_u32_le(1 + MAX_TEXT_INPUT_LEN as u32 + 1);
+        huge.put_u8(msg_type::TEXT_INPUT);
+        huge.put_slice(&vec![b'a'; MAX_TEXT_INPUT_LEN + 1]);
+        assert_eq!(
+            Message::decode(&huge),
+            Err(DecodeError::InvalidValue("text input too large"))
+        );
+
+        let mut bad_utf8 = BytesMut::new();
+        bad_utf8.put_u32_le(3);
+        bad_utf8.put_u8(msg_type::TEXT_INPUT);
+        bad_utf8.put_slice(&[0xFF, 0xFE]);
+        assert_eq!(
+            Message::decode(&bad_utf8),
+            Err(DecodeError::InvalidValue("text input not UTF-8"))
+        );
     }
 
     #[test]

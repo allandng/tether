@@ -13,6 +13,7 @@ use tether_protocol::{
 };
 use tracing::{debug, info, warn};
 
+use crate::input::InjectCommand;
 use crate::server::ServerState;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -107,7 +108,10 @@ async fn handle_incoming(bytes: &[u8], state: &ServerState) {
         Ok(Decoded::Message { message: Message::InputEvent(ev), .. }) => {
             debug!(?ev, "input event");
             // If the injector is gone the daemon is shutting down; drop silently.
-            let _ = state.input_tx.send(ev).await;
+            let _ = state.input_tx.send(InjectCommand::Event(ev)).await;
+        }
+        Ok(Decoded::Message { message: Message::TextInput(t), .. }) => {
+            let _ = state.input_tx.send(InjectCommand::Text(t.text)).await;
         }
         Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
             let _ = state.clipboard_in.send(c.text);

@@ -1,8 +1,9 @@
 use clap::Parser;
 use tokio::sync::mpsc;
 use tetherd::config::Args;
+use tetherd::input::InjectCommand;
 use tetherd::server::{Server, ServerState};
-use tracing::{debug, info};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -104,7 +105,7 @@ fn start_capture(
 /// (System Settings → Privacy & Security → Accessibility) — without it macOS
 /// silently discards posted events.
 #[cfg(target_os = "macos")]
-fn start_injector(mut input_rx: mpsc::Receiver<tether_protocol::InputEvent>) {
+fn start_injector(mut input_rx: mpsc::Receiver<InjectCommand>) {
     use tetherd::input::InputInjector;
     std::thread::spawn(move || {
         let mut injector = match tetherd::input::macos::MacInjector::new() {
@@ -114,9 +115,12 @@ fn start_injector(mut input_rx: mpsc::Receiver<tether_protocol::InputEvent>) {
                 return;
             }
         };
-        while let Some(ev) = input_rx.blocking_recv() {
-            debug!(?ev, "injecting");
-            if let Err(e) = injector.inject(&ev) {
+        while let Some(cmd) = input_rx.blocking_recv() {
+            let result = match &cmd {
+                InjectCommand::Event(ev) => injector.inject(ev),
+                InjectCommand::Text(text) => injector.inject_text(text),
+            };
+            if let Err(e) = result {
                 tracing::warn!(error = %e, "inject failed");
             }
         }
@@ -124,7 +128,7 @@ fn start_injector(mut input_rx: mpsc::Receiver<tether_protocol::InputEvent>) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn start_injector(mut input_rx: mpsc::Receiver<tether_protocol::InputEvent>) {
+fn start_injector(mut input_rx: mpsc::Receiver<InjectCommand>) {
     tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
 }
 

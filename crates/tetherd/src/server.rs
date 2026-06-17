@@ -5,11 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Context;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
-use tether_protocol::{InputEvent, Resolution};
+use tether_protocol::Resolution;
 use tracing::{info, warn};
 
 use crate::capture::EncodedFrame;
 use crate::config::{ip_allowed, validate_bind_addr};
+use crate::input::InjectCommand;
 use crate::session;
 
 /// Everything a session needs, decoupled from where it comes from so tests
@@ -20,8 +21,9 @@ pub struct ServerState {
     pub resolution: watch::Receiver<Resolution>,
     /// Latest encoded frame, latest-wins. `None` until capture produces one.
     pub frames: watch::Receiver<Option<EncodedFrame>>,
-    /// Input events bound for the platform injector.
-    pub input_tx: mpsc::Sender<InputEvent>,
+    /// Input events and soft-keyboard text bound for the platform injector,
+    /// on one ordered channel so they interleave correctly.
+    pub input_tx: mpsc::Sender<InjectCommand>,
     /// Latest host clipboard text; `None` until the first copy.
     pub clipboard_out: watch::Receiver<Option<String>>,
     /// Clipboard content from the controller, bound for the host pasteboard.

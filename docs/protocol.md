@@ -140,6 +140,19 @@ processing any input event that arrives after it (this ordering is what makes
 the application's job: don't re-send content identical to what was last
 applied or sent.
 
+### 0x06 — TextInput (controller → host)
+
+```
+0  …  payload  committed UTF-8 text, ≤ 1024 bytes
+```
+
+Committed text from a soft keyboard (no usable `KeyboardEvent.code`). The host
+injects it as Unicode directly (e.g. `CGEventKeyboardSetUnicodeString` on
+macOS), bypassing the DOM-code → virtual-key path — which can't express emoji
+or non-US layouts. Hardware keyboards still use `InputEvent` KeyDown/KeyUp;
+`TextInput` is specifically for on-screen-keyboard character commits. Refused
+above the cap, never truncated.
+
 ## WebRTC transport mapping (Phase 2)
 
 Three data channels, all carrying the wire format above unchanged:
@@ -149,7 +162,8 @@ Three data channels, all carrying the wire format above unchanged:
   interop; some stacks silently drop larger ones).
 - **`tether-media`** (reliable, ordered): `FrameData` only, chunked.
 - **`tether-bulk`** (reliable, ordered): anything oversized — `ClipboardData`
-  today, file transfer later — chunked with the same framing.
+  today, file transfer later — chunked with the same framing. `TextInput` is
+  small and rides `tether-ctl`.
 
 Chunk framing (media and bulk): `[u32 LE seq][u16 LE chunk_idx]
 [u16 LE chunk_count]` followed by a slice of the complete wire message;

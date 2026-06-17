@@ -220,6 +220,26 @@ impl InputInjector for MacInjector {
         }
         Ok(())
     }
+
+    /// Inject committed Unicode text via CGEventKeyboardSetUnicodeString:
+    /// keycode 0, the string riding the keydown, keyup completing the tap.
+    /// Layout-independent and emoji-capable — what soft keyboards need.
+    fn inject_text(&mut self, text: &str) -> anyhow::Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.declare_activity();
+        let down = CGEvent::new_keyboard_event(self.source.clone(), 0, true)
+            .map_err(|()| anyhow!("failed to create text keydown event"))?;
+        down.set_string(text);
+        // Held modifiers (e.g. a stuck cmd) would corrupt typed text; inject
+        // the unicode string with no flags so it lands verbatim.
+        down.post(CGEventTapLocation::HID);
+        let up = CGEvent::new_keyboard_event(self.source.clone(), 0, false)
+            .map_err(|()| anyhow!("failed to create text keyup event"))?;
+        up.post(CGEventTapLocation::HID);
+        Ok(())
+    }
 }
 
 /// Map protocol-normalized coordinates onto display points.

@@ -6,6 +6,7 @@ export const PROTOCOL_VERSION = 1;
 export const MAX_MESSAGE_LEN = 64 * 1024 * 1024;
 export const MAX_KEY_CODE_LEN = 32;
 export const MAX_CLIPBOARD_LEN = 256 * 1024;
+export const MAX_TEXT_INPUT_LEN = 1024;
 
 export const CAP_CAN_HOST = 0b01;
 export const CAP_CAN_CONTROL = 0b10;
@@ -31,6 +32,7 @@ const enum MsgType {
   FrameData = 0x03,
   InputEvent = 0x04,
   ClipboardData = 0x05,
+  TextInput = 0x06,
 }
 
 const enum ClipboardKind {
@@ -81,7 +83,12 @@ export interface ClipboardData {
   text: string;
 }
 
-export type Message = Hello | Resolution | FrameData | InputEvent | ClipboardData;
+export interface TextInput {
+  type: "text";
+  text: string;
+}
+
+export type Message = Hello | Resolution | FrameData | InputEvent | ClipboardData | TextInput;
 
 export type DecodeResult =
   | { ok: true; message: Message }
@@ -197,6 +204,21 @@ export function encodeClipboardData(c: Omit<ClipboardData, "type">): Uint8Array 
   );
 }
 
+export function encodeTextInput(t: Omit<TextInput, "type">): Uint8Array {
+  const text = textEncoder.encode(t.text);
+  if (text.length > MAX_TEXT_INPUT_LEN) {
+    throw new Error(`text input too large: ${text.length} bytes`);
+  }
+  return finish(
+    (view, bytes) => {
+      view.setUint8(4, MsgType.TextInput);
+      bytes.set(text, 5);
+      return 1 + text.length;
+    },
+    1 + text.length,
+  );
+}
+
 export function encodeMessage(m: Message): Uint8Array {
   switch (m.type) {
     case "hello":
@@ -209,6 +231,8 @@ export function encodeMessage(m: Message): Uint8Array {
       return encodeInputEvent(m);
     case "clipboard":
       return encodeClipboardData(m);
+    case "text":
+      return encodeTextInput(m);
   }
 }
 
@@ -273,6 +297,16 @@ export function decodeMessage(data: ArrayBuffer | Uint8Array): DecodeResult {
         return corrupt("clipboard not UTF-8");
       }
       return ok({ type: "clipboard", text });
+    }
+    case MsgType.TextInput: {
+      if (payloadLen > MAX_TEXT_INPUT_LEN) return corrupt("text input too large");
+      let text: string;
+      try {
+        text = textDecoder.decode(bytes.subarray(5));
+      } catch {
+        return corrupt("text input not UTF-8");
+      }
+      return ok({ type: "text", text });
     }
     default:
       return { ok: false, reason: "unknown-type", msgType };

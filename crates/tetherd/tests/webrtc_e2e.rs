@@ -18,12 +18,13 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use tether_protocol::{
-    CAP_CAN_CONTROL, ClipboardData, Codec, Decoded, Hello, InputEvent, Message, PROTOCOL_VERSION,
+    CAP_CAN_CONTROL, ClipboardData, Codec, Decoded, Hello, InputEvent, Message, PROTOCOL_VERSION, TextInput,
     Resolution, Role,
 };
 use tether_signal::protocol::{Caps, ClientMessage, ServerMessage};
 use tetherd::capture::{EncodedFrame, RawFrame, ScreenCapturer};
 use tetherd::encode::JpegEncoder;
+use tetherd::input::InjectCommand;
 use tetherd::server::ServerState;
 use tetherd::webrtc::{FrameReassembler, RtcConfig, run_host};
 
@@ -277,7 +278,17 @@ async fn webrtc_end_to_end_frames_and_input() {
         .await
         .expect("timed out waiting for input event")
         .expect("input channel closed");
-    assert_eq!(received, ev);
+    assert!(matches!(received, InjectCommand::Event(e) if e == ev));
+
+    // --- soft-keyboard text path: controller -> ctl channel -> injector queue
+    ctl.send(&Message::TextInput(TextInput { text: "señor 🎯".into() }).encode())
+        .await
+        .unwrap();
+    let text_cmd = tokio::time::timeout(deadline, input_rx.recv())
+        .await
+        .expect("timed out waiting for text input")
+        .expect("input channel closed");
+    assert!(matches!(text_cmd, InjectCommand::Text(t) if t == "señor 🎯"));
 
     // --- clipboard, both directions over the bulk channel, sized past the
     // single-message SCTP limit to prove the chunked path.

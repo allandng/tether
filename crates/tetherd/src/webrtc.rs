@@ -31,6 +31,7 @@ use tether_signal::protocol::{Caps, ClientMessage, ErrorCode, ServerMessage};
 use tracing::{debug, info, warn};
 
 use crate::capture::EncodedFrame;
+use crate::input::InjectCommand;
 use crate::server::ServerState;
 use crate::session::{host_hello, validate_controller_hello};
 
@@ -366,7 +367,10 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
                     let Some(bytes) = incoming else { break };
                     match Message::decode(&bytes) {
                         Ok(Decoded::Message { message: Message::InputEvent(ev), .. }) => {
-                            let _ = state.input_tx.send(ev).await;
+                            let _ = state.input_tx.send(InjectCommand::Event(ev)).await;
+                        }
+                        Ok(Decoded::Message { message: Message::TextInput(t), .. }) => {
+                            let _ = state.input_tx.send(InjectCommand::Text(t.text)).await;
                         }
                         Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
                             let _ = state.clipboard_in.send(c.text);
