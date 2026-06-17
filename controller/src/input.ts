@@ -154,7 +154,11 @@ export function attachInput(
       return;
     }
     if (e.button > 2) return;
-    canvas.setPointerCapture(e.pointerId);
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      // no active pointer (e.g. a synthetic event); capture is best-effort
+    }
     const { x, y } = point(e);
     connection.sendInput({ type: "input", kind: "mousedown", button: e.button, x, y });
     e.preventDefault();

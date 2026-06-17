@@ -39,3 +39,16 @@ each got the simplest choice that doesn't block Phase 2.
 | **Clipboard history / multi-item** | Last-copy-wins only. | Probably never (out of product scope). |
 | **iPad paste affordance** | Hardware-keyboard Cmd+V works; no touch-native paste gesture in the controller UI. | Phase 4 touch UX. |
 | **navigator.clipboard on HTTPS** | Auto-write requires a secure context; LAN HTTP serving means the chip is the common path on real devices. | If the controller ever ships with TLS/PWA packaging. |
+
+## Phase 4 additions
+
+| Decision | Phase 4 choice | Revisit when |
+|---|---|---|
+| **Android / non-iOS IME** | `beforeinput` harvesting targets iOS Safari; Android IMEs (composition-heavy) are untested. | When Android controllers matter. |
+| **Real-device gesture tuning** | Thresholds (tap/long-press/slop/pinch) are educated defaults, config-injectable but verified only with synthetic events. | After an iPad pass; sweep constants on hardware. |
+| **Two-finger-tap centroid** | Right-click lands at the two fingers' centroid — can be on empty space if fingers are far apart. | If it bites; use the first finger's point instead. |
+| **Momentum scrolling / haptics / Pencil hover** | None — scroll is 1:1 finger travel, no inertia. | Phase 5 polish. |
+| **Double-tap-to-reset zoom** | Reset is by pinching back to 1× (clamped); no dedicated reset gesture/button. | If users want it; the engine has no 2-finger-double-tap. |
+| **ctrl→cmd remap (carried from P3)** | Still not remapped; hardware Ctrl on a non-Mac keyboard isn't translated to Cmd. | A keyboard-settings pass. |
+| **Client-drawn cursor** | Trackpad mode shows no local cursor dot; the host cursor (composited into the capture) is the only feedback, so relative-mode aiming lags by one frame. | Phase 5 (client cursor overlay, already deferred there). |
+| **iPhone fullscreen** | Fullscreen API is iPad-only on iOS; the ⛶ button hides where unsupported. | If a chromeless iPhone experience is needed (add-to-home-screen PWA). |

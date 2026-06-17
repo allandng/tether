@@ -12,7 +12,7 @@ for media (peer-to-peer, DTLS-encrypted).
 | 1 — LAN MVP | WS transport, ScreenCaptureKit capture, JPEG, full mouse/keyboard injection | ✅ Done — [gate results](docs/phase1-gate-results.md) (29 fps native, ~40 ms) |
 | 2 — WebRTC | Signaling server, P2P data channels, hardware H.264 (VideoToolbox ↔ WebCodecs) | ✅ Done — [gate results](docs/phase2-gate-results.md) (2.5 Mbps at native res) |
 | 3 — Clipboard | Bidirectional text clipboard sync, paste-keystroke ordering | ✅ Done — [gate results](docs/phase3-gate-results.md) |
-| 4 — Touch UX | Gesture engine (tap/long-press/2-finger scroll/pinch), soft-keyboard TextInput, phone UI | 📝 [Planned](docs/phase4-plan.md), awaiting approval |
+| 4 — Touch UX | Gesture engine (tap/long-press/2-finger scroll/pinch), soft-keyboard TextInput, phone UI | ✅ Done — [gate results](docs/phase4-gate-results.md) (synthetic-touch verified; iPad pass pending) |
 | 5 — Hardening | TURN relay, adaptive bitrate, device pairing auth, multi-monitor, client-drawn cursor | Future |
 
 Verified end-to-end on a single machine (including connect-while-display-asleep
