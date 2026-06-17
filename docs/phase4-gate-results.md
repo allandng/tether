@@ -31,6 +31,18 @@ remains a human check** (synthetic events can't reproduce every Safari quirk).
 - **Text injection has no modifier flags**: held modifiers would corrupt typed
   Unicode, so `inject_text` posts the string with clean flags.
 
+## Adversarial review pass
+
+After the modules landed, a multi-agent review (four dimension reviewers, each
+finding independently verified by a skeptic agent) swept the touch code and
+confirmed **10 real bugs** — most notably a *critical* stuck-left-button when a
+second finger landed mid-hold-drag (left the host button held with no
+mouseup), plus the same leak on `reset()` and on a transport switch
+mid-drag, double-tap fusing across an intervening gesture, a letterbox pan
+escape, and an autocorrect double-insert. All 10 are fixed and committed; the
+stuck-button fix was re-verified live (`move, down0, move, up0` — balanced).
+This is why the gate is trustworthy beyond the happy-path tests.
+
 ## Remaining human checks (real device)
 
 1. iPad/iPhone Safari: confirm pointer-event delivery, the gesture feel

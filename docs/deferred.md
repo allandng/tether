@@ -45,6 +45,7 @@ each got the simplest choice that doesn't block Phase 2.
 | Decision | Phase 4 choice | Revisit when |
 |---|---|---|
 | **Android / non-iOS IME** | `beforeinput` harvesting targets iOS Safari; Android IMEs (composition-heavy) are untested. | When Android controllers matter. |
+| **Autocorrect replacement accuracy** | `insertReplacementText` deletes the replaced span via `getTargetRanges()` (iOS 17+), falling back to the field length. The exact delete count under real iOS autocorrect is unverified without a device. | iPad pass; if wrong, track the pending word client-side and diff. |
 | **Real-device gesture tuning** | Thresholds (tap/long-press/slop/pinch) are educated defaults, config-injectable but verified only with synthetic events. | After an iPad pass; sweep constants on hardware. |
 | **Two-finger-tap centroid** | Right-click lands at the two fingers' centroid — can be on empty space if fingers are far apart. | If it bites; use the first finger's point instead. |
 | **Momentum scrolling / haptics / Pencil hover** | None — scroll is 1:1 finger travel, no inertia. | Phase 5 polish. |
