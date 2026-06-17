@@ -13,6 +13,7 @@ import {
   encodeClipboardData,
   encodeHello,
   encodeInputEvent,
+  encodeTextInput,
 } from "./protocol";
 
 export interface SessionEvents {
@@ -57,6 +58,12 @@ export class ProtocolSession {
   sendClipboard(text: string): void {
     if (this.handshaken) {
       this.sendBytes(encodeClipboardData({ text }));
+    }
+  }
+
+  sendText(text: string): void {
+    if (this.handshaken && text.length > 0) {
+      this.sendBytes(encodeTextInput({ text }));
     }
   }
 

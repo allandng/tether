@@ -12,6 +12,9 @@ export interface DisplayedRect {
   height: number;
 }
 
+/** Maximum local pinch-zoom factor. */
+const MAX_ZOOM = 4;
+
 export class Viewer {
   private readonly ctx: CanvasRenderingContext2D;
   private decoding = false;
@@ -20,16 +23,80 @@ export class Viewer {
   private lastTimestampMicros = 0;
   private h264: H264Stream | null = null;
 
+  // Local pinch-zoom transform (committed), applied to the canvas element.
+  // The coordinate mapping is transform-invariant (displayedRect measures the
+  // transformed canvas via getBoundingClientRect), so this never touches the
+  // wire — it only magnifies the local view for touch precision.
+  private scale = 1;
+  private tx = 0;
+  private ty = 0;
+  // per-pinch anchor state
+  private pinch: { s0: number; fx0: number; fy0: number; pfx: number; pfy: number } | null = null;
+
   constructor(private readonly canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d context");
     this.ctx = ctx;
+    this.canvas.style.transformOrigin = "0 0";
   }
 
   setResolution(resolution: Resolution): void {
     // Canvas backing store = capture pixels; CSS handles the fit.
     this.canvas.width = resolution.width;
     this.canvas.height = resolution.height;
+  }
+
+  /**
+   * Apply a pinch gesture's cumulative `scale` about the live `focal` point,
+   * keeping the content point under the fingers fixed (pinch-to-pan). The
+   * transform is live (not yet committed) until {@link endZoom}.
+   */
+  applyZoom(scale: number, focalX: number, focalY: number): void {
+    if (!this.pinch) {
+      // anchor: which content point sits under the focal at pinch start
+      this.pinch = {
+        s0: this.scale,
+        fx0: focalX,
+        fy0: focalY,
+        pfx: (focalX - this.tx) / this.scale,
+        pfy: (focalY - this.ty) / this.scale,
+      };
+    }
+    const target = clamp(this.pinch.s0 * scale, 1, MAX_ZOOM);
+    // keep the anchored content point under the current focal
+    const liveTx = focalX - target * this.pinch.pfx;
+    const liveTy = focalY - target * this.pinch.pfy;
+    this.setTransform(target, liveTx, liveTy);
+  }
+
+  /** Commit the live pinch transform and clamp pan to keep content on screen. */
+  endZoom(): void {
+    this.pinch = null;
+    this.clampPan();
+  }
+
+  private setTransform(scale: number, tx: number, ty: number): void {
+    this.scale = scale;
+    this.tx = tx;
+    this.ty = ty;
+    if (scale === 1) {
+      this.tx = 0;
+      this.ty = 0;
+      this.canvas.style.transform = "";
+    } else {
+      this.canvas.style.transform = `translate(${this.tx}px, ${this.ty}px) scale(${scale})`;
+    }
+  }
+
+  /** Pan can't expose empty space: clamp tx,ty so the scaled canvas covers the box. */
+  private clampPan(): void {
+    if (this.scale === 1) return;
+    // clientWidth/Height are layout (transform-agnostic) → the untransformed box
+    const vw = this.canvas.clientWidth;
+    const vh = this.canvas.clientHeight;
+    const tx = clamp(this.tx, vw * (1 - this.scale), 0);
+    const ty = clamp(this.ty, vh * (1 - this.scale), 0);
+    this.setTransform(this.scale, tx, ty);
   }
 
   /**
@@ -123,4 +190,8 @@ export class Viewer {
       if (next) void this.decodeAndDraw(next);
     }
   }
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
 }

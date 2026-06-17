@@ -14,7 +14,8 @@ export interface InputSink {
 
 /** Local view-zoom requests from a pinch gesture (handled by the viewer). */
 export interface ZoomSink {
-  zoom(scale: number, focalX: number, focalY: number): void;
+  applyZoom(scale: number, focalX: number, focalY: number): void;
+  endZoom(): void;
 }
 
 export interface NormalizedPoint {
@@ -102,7 +103,8 @@ export function attachInput(
       }
     },
     scroll: (dx, dy) => connection.sendInput({ type: "input", kind: "scroll", dx, dy }),
-    zoom: (scale, fx, fy) => zoomSink?.zoom(scale, fx, fy),
+    zoom: (scale, fx, fy) => zoomSink?.applyZoom(scale, fx, fy),
+    zoomEnd: () => zoomSink?.endZoom(),
   };
 
   const gestures = new GestureMachine(sink, {

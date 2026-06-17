@@ -1,8 +1,15 @@
 import { HostClipboard, PasteFlow } from "./clipboard";
 import { TetherConnection, type ConnectionEvents, type Transport } from "./connection";
 import { attachInput } from "./input";
+import { SoftKeyboard } from "./keyboard";
+import type { Mode } from "./gestures";
 import { Viewer } from "./viewer";
 import { WebRtcTransport } from "./webrtc";
+
+/** Coarse pointer + narrow viewport ⇒ phone/tablet; pick trackpad on phones. */
+const isTouchDevice = () =>
+  typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
+const isPhone = () => isTouchDevice() && Math.min(screen.width, screen.height) < 600;
 
 function setup(): void {
   const app = document.querySelector<HTMLDivElement>("#app");
@@ -25,6 +32,9 @@ function setup(): void {
       </span>
       <button id="connect">Connect</button>
       <button id="clip" hidden title="Copy host clipboard to this device">📋</button>
+      <button id="kbd" hidden title="Toggle keyboard">⌨</button>
+      <button id="ptr" hidden title="Pointer mode">🖱</button>
+      <button id="full" hidden title="Fullscreen">⛶</button>
       <span id="stats"></span>
     </div>
     <div id="stage"><canvas id="view" tabindex="0"></canvas></div>
@@ -53,6 +63,11 @@ function setup(): void {
       dot.className = s;
       connectBtn.textContent = wantConnection ? "Disconnect" : "Connect";
       stats.textContent = detail ?? "";
+      // touch-only affordances appear once connected on a touch device
+      const showTouchUi = s === "connected" && isTouchDevice();
+      kbdBtn.hidden = !showTouchUi;
+      ptrBtn.hidden = !showTouchUi;
+      fullBtn.hidden = s !== "connected" || !document.fullscreenEnabled;
       if (s === "connected") canvas.focus();
       if (s === "closed" && wantConnection && !reconnectTimer) {
         stats.textContent = detail ?? "reconnecting…";
@@ -117,9 +132,55 @@ function setup(): void {
     }
   }
 
-  // input events route to whatever transport is currently active.
-  // Touch (tablet) defaults to absolute; phones get trackpad mode in M3.
-  attachInput(canvas, viewer, { sendInput: (ev) => active?.sendInput(ev) }, { pasteFlow });
+  // Touch UI: keyboard, pointer-mode toggle, fullscreen.
+  const kbdBtn = $<HTMLButtonElement>("#kbd");
+  const ptrBtn = $<HTMLButtonElement>("#ptr");
+  const fullBtn = $<HTMLButtonElement>("#full");
+
+  const softKeyboard = new SoftKeyboard({
+    sendText: (text) => active?.sendText(text),
+    sendKeyTap: (code) => {
+      active?.sendInput({ type: "input", kind: "keydown", code, modifiers: 0 });
+      active?.sendInput({ type: "input", kind: "keyup", code, modifiers: 0 });
+    },
+  });
+  kbdBtn.addEventListener("click", () => {
+    const open = softKeyboard.toggle(); // synchronous: inside the click gesture
+    kbdBtn.classList.toggle("on", open);
+  });
+
+  // input events route to whatever transport is currently active. Phones
+  // default to trackpad (relative cursor); tablets to absolute touch.
+  let pointerMode: Mode =
+    (localStorage.getItem("tether-ptr-mode") as Mode | null) ??
+    (isPhone() ? "trackpad" : "touch");
+  const input = attachInput(
+    canvas,
+    viewer,
+    { sendInput: (ev) => active?.sendInput(ev) },
+    { pasteFlow, zoomSink: viewer, touchMode: pointerMode },
+  );
+  const reflectPtr = () => {
+    ptrBtn.textContent = pointerMode === "trackpad" ? "🖱" : "👆";
+    ptrBtn.title = pointerMode === "trackpad" ? "Trackpad mode" : "Direct touch mode";
+  };
+  reflectPtr();
+  ptrBtn.addEventListener("click", () => {
+    pointerMode = pointerMode === "trackpad" ? "touch" : "trackpad";
+    localStorage.setItem("tether-ptr-mode", pointerMode);
+    input.setMode(pointerMode);
+    reflectPtr();
+    canvas.focus();
+  });
+
+  fullBtn.addEventListener("click", () => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void app.requestFullscreen().catch(() => {});
+    }
+    canvas.focus();
+  });
 
   // field persistence + ?host= / ?mode= shortcuts
   const params = new URLSearchParams(location.search);

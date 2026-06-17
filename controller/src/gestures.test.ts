@@ -19,6 +19,7 @@ function harness(mode: Mode, overrides: Partial<GestureConfig> = {}) {
     doubleClick: () => events.push("dbl"),
     scroll: (dx, dy) => events.push(`scroll(${dx},${dy})`),
     zoom: (s, fx, fy) => events.push(`zoom(${s.toFixed(2)},${Math.round(fx)},${Math.round(fy)})`),
+    zoomEnd: () => events.push("zoomEnd"),
   };
   const m = new GestureMachine(sink, {
     mode,
@@ -165,7 +166,7 @@ describe("two-finger gestures", () => {
     m.onMove(2, 380, 200, 70); // d=180 → scale 3.0
     m.onUp(2, 380, 200, 100);
     m.onUp(1, 200, 200, 110);
-    expect(events).toEqual(["zoom(2.00,260,200)", "zoom(3.00,290,200)"]);
+    expect(events).toEqual(["zoom(2.00,260,200)", "zoom(3.00,290,200)", "zoomEnd"]);
   });
 
   it("second finger mid-drag → scroll, no spurious click or button", () => {

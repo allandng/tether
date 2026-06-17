@@ -171,6 +171,11 @@ export class WebRtcTransport implements Transport {
     }
   }
 
+  sendText(text: string): void {
+    // Small committed text rides the reliable ctl channel via the session.
+    this.session?.sendText(text);
+  }
+
   close(): void {
     this.signaling?.close();
     this.signaling = null;

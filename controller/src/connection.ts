@@ -18,6 +18,7 @@ export interface Transport {
   close(): void;
   sendInput(ev: InputEvent): void;
   sendClipboard(text: string): void;
+  sendText(text: string): void;
   readonly connected: boolean;
 }
 
@@ -77,6 +78,10 @@ export class TetherConnection implements Transport {
 
   sendClipboard(text: string): void {
     this.session?.sendClipboard(text);
+  }
+
+  sendText(text: string): void {
+    this.session?.sendText(text);
   }
 
   close(): void {

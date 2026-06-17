@@ -28,8 +28,11 @@ export interface GestureSink {
   click(button: number): void;
   doubleClick(): void;
   scroll(dx: number, dy: number): void;
-  /** LOCAL view zoom — never forwarded to the host. */
+  /** LOCAL view zoom — never forwarded to the host. `scale` is cumulative
+   * from the start of the current pinch; `focal` is the live centroid. */
   zoom(scale: number, focalX: number, focalY: number): void;
+  /** The current pinch ended — commit the live zoom transform. */
+  zoomEnd(): void;
 }
 
 export interface Rect {
@@ -281,6 +284,7 @@ export class GestureMachine {
       case State.TwoScroll:
       case State.TwoPinch:
       case State.TwoDraining: {
+        if (this.state === State.TwoPinch) this.sink.zoomEnd();
         this.removePointer(id);
         if (this.pointers.size === 0) this.toIdle();
         else this.state = State.TwoDraining;
@@ -298,6 +302,7 @@ export class GestureMachine {
     if (this.state === State.HoldDrag) {
       this.sink.up(0); // never leave a button stuck
     }
+    if (this.state === State.TwoPinch) this.sink.zoomEnd();
     this.removePointer(id);
     if (this.pointers.size === 0) this.toIdle();
     else if (this.state !== State.Idle) this.state = State.TwoDraining;

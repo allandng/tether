@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>Tether</title>
     <style>
       html,
@@ -24,8 +30,12 @@
         align-items: center;
         gap: 8px;
         padding: 8px 12px;
+        padding-top: max(8px, env(safe-area-inset-top));
+        padding-left: max(12px, env(safe-area-inset-left));
+        padding-right: max(12px, env(safe-area-inset-right));
         background: #1c1c1e;
         flex: none;
+        flex-wrap: wrap;
       }
       #dot {
         width: 10px;
@@ -58,7 +68,10 @@
         font: inherit;
         cursor: pointer;
       }
-      #clip {
+      #clip,
+      #kbd,
+      #ptr,
+      #full {
         background: #2a2a2d;
         border: 1px solid #4a4a4e;
         border-radius: 6px;
@@ -66,13 +79,41 @@
         font: inherit;
         cursor: pointer;
       }
-      #clip:hover {
+      #clip:hover,
+      #kbd:hover,
+      #ptr:hover,
+      #full:hover {
         background: #3a3a3e;
+      }
+      #kbd.on {
+        background: #3578f6;
+        border-color: #3578f6;
       }
       #signal,
       #secret,
       #target {
         width: 150px;
+      }
+      /* Phone layout: full-width inputs, the connect bar stacks. */
+      @media (pointer: coarse) and (max-width: 600px) {
+        #host,
+        #signal,
+        #secret,
+        #target {
+          width: 100%;
+          padding: 10px;
+        }
+        #lan-fields,
+        #rtc-fields {
+          flex: 1 1 100%;
+        }
+        #connect,
+        #clip,
+        #kbd,
+        #ptr,
+        #full {
+          padding: 10px 14px;
+        }
       }
       #lan-fields,
       #rtc-fields {
@@ -99,7 +140,12 @@
         height: 100%;
         object-fit: contain;
         outline: none;
+        /* swallow all native touch behaviors so gestures reach our handlers */
         touch-action: none;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+        overscroll-behavior: none;
       }
     </style>
   </head>
