@@ -2,6 +2,7 @@
 // as protocol InputEvents with normalized coordinates.
 
 import type { PasteFlow } from "./clipboard";
+import { GestureMachine, type GestureSink, type Mode } from "./gestures";
 import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, type InputEvent } from "./protocol";
 import type { Viewer } from "./viewer";
 
@@ -9,6 +10,11 @@ import type { Viewer } from "./viewer";
  * whichever transport is currently active). */
 export interface InputSink {
   sendInput(ev: InputEvent): void;
+}
+
+/** Local view-zoom requests from a pinch gesture (handled by the viewer). */
+export interface ZoomSink {
+  zoom(scale: number, focalX: number, focalY: number): void;
 }
 
 export interface NormalizedPoint {
@@ -54,23 +60,98 @@ export function wheelToPixels(delta: number, deltaMode: number): number {
   return clampI16(delta * scale);
 }
 
+export interface InputOptions {
+  pasteFlow?: PasteFlow;
+  zoomSink?: ZoomSink;
+  /** Touch pointer mode; defaults to "touch" (absolute). */
+  touchMode?: Mode;
+}
+
 export function attachInput(
   canvas: HTMLCanvasElement,
   viewer: Viewer,
   connection: InputSink,
-  pasteFlow?: PasteFlow,
-): void {
+  options: InputOptions = {},
+): { setMode(mode: Mode): void } {
+  const { pasteFlow, zoomSink } = options;
   const point = (e: { clientX: number; clientY: number }) =>
     normalizedFromClient(e.clientX, e.clientY, viewer.displayedRect());
 
+  // --- touch gesture engine -------------------------------------------------
+  // Its sink speaks client px; we normalize through the displayed rect (which
+  // reflects pinch zoom) on the way out. lastNorm carries the most recent
+  // normalized point so button presses land where the cursor is.
+  let lastNorm = { x: 0, y: 0 };
+  const sink: GestureSink = {
+    moveAbs: (cx, cy) => {
+      lastNorm = normalizedFromClient(cx, cy, viewer.displayedRect());
+      connection.sendInput({ type: "input", kind: "mousemove", x: lastNorm.x, y: lastNorm.y });
+    },
+    down: (button) =>
+      connection.sendInput({ type: "input", kind: "mousedown", button, x: lastNorm.x, y: lastNorm.y }),
+    up: (button) =>
+      connection.sendInput({ type: "input", kind: "mouseup", button, x: lastNorm.x, y: lastNorm.y }),
+    click: (button) => {
+      connection.sendInput({ type: "input", kind: "mousedown", button, x: lastNorm.x, y: lastNorm.y });
+      connection.sendInput({ type: "input", kind: "mouseup", button, x: lastNorm.x, y: lastNorm.y });
+    },
+    doubleClick: () => {
+      for (let i = 0; i < 2; i++) {
+        connection.sendInput({ type: "input", kind: "mousedown", button: 0, x: lastNorm.x, y: lastNorm.y });
+        connection.sendInput({ type: "input", kind: "mouseup", button: 0, x: lastNorm.x, y: lastNorm.y });
+      }
+    },
+    scroll: (dx, dy) => connection.sendInput({ type: "input", kind: "scroll", dx, dy }),
+    zoom: (scale, fx, fy) => zoomSink?.zoom(scale, fx, fy),
+  };
+
+  const gestures = new GestureMachine(sink, {
+    mode: options.touchMode ?? "touch",
+    bounds: viewer.displayedRect(),
+  });
+
+  // The machine returns its single pending deadline (long-press); schedule one
+  // timer and feed it back through tick().
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const schedule = (deadline: number | null) => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (deadline !== null) {
+      const delay = Math.max(0, deadline - performance.now());
+      timer = setTimeout(() => {
+        timer = null;
+        schedule(gestures.tick(performance.now()));
+      }, delay);
+    }
+  };
+
+  const isTouch = (e: PointerEvent) => e.pointerType === "touch" || e.pointerType === "pen";
+
   canvas.addEventListener("pointermove", (e) => {
+    if (isTouch(e)) {
+      schedule(gestures.onMove(e.pointerId, e.clientX, e.clientY, performance.now()));
+      return;
+    }
     const { x, y } = point(e);
     connection.sendInput({ type: "input", kind: "mousemove", x, y });
   });
 
   canvas.addEventListener("pointerdown", (e) => {
-    if (e.button > 2) return;
     canvas.focus();
+    if (isTouch(e)) {
+      gestures.setBounds(viewer.displayedRect());
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // capture may be unavailable for touch on some browsers; harmless
+      }
+      schedule(gestures.onDown(e.pointerId, e.clientX, e.clientY, performance.now()));
+      e.preventDefault();
+      return;
+    }
+    if (e.button > 2) return;
     canvas.setPointerCapture(e.pointerId);
     const { x, y } = point(e);
     connection.sendInput({ type: "input", kind: "mousedown", button: e.button, x, y });
@@ -78,10 +159,19 @@ export function attachInput(
   });
 
   canvas.addEventListener("pointerup", (e) => {
+    if (isTouch(e)) {
+      schedule(gestures.onUp(e.pointerId, e.clientX, e.clientY, performance.now()));
+      e.preventDefault();
+      return;
+    }
     if (e.button > 2) return;
     const { x, y } = point(e);
     connection.sendInput({ type: "input", kind: "mouseup", button: e.button, x, y });
     e.preventDefault();
+  });
+
+  canvas.addEventListener("pointercancel", (e) => {
+    if (isTouch(e)) schedule(gestures.onCancel(e.pointerId));
   });
 
   // The host gets the right-click; don't also open the local menu.
@@ -140,4 +230,6 @@ export function attachInput(
       connection.sendInput({ type: "input", kind: "keyup", code, modifiers: 0 });
     }
   });
+
+  return { setMode: (mode: Mode) => gestures.setMode(mode) };
 }

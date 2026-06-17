@@ -117,13 +117,9 @@ function setup(): void {
     }
   }
 
-  // input events route to whatever transport is currently active
-  attachInput(
-    canvas,
-    viewer,
-    { sendInput: (ev) => active?.sendInput(ev) },
-    pasteFlow,
-  );
+  // input events route to whatever transport is currently active.
+  // Touch (tablet) defaults to absolute; phones get trackpad mode in M3.
+  attachInput(canvas, viewer, { sendInput: (ev) => active?.sendInput(ev) }, { pasteFlow });
 
   // field persistence + ?host= / ?mode= shortcuts
   const params = new URLSearchParams(location.search);
