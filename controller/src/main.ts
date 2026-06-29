@@ -35,6 +35,10 @@ function setup(): void {
       <button id="kbd" hidden title="Toggle keyboard">⌨</button>
       <button id="ptr" hidden title="Pointer mode">🖱</button>
       <button id="full" hidden title="Fullscreen">⛶</button>
+      <span id="pair" hidden>
+        <input id="paircode" type="text" placeholder="pairing code" spellcheck="false" autocomplete="off" />
+        <button id="pairgo">Pair</button>
+      </span>
       <span id="stats"></span>
     </div>
     <div id="stage"><canvas id="view" tabindex="0"></canvas></div>
@@ -68,7 +72,10 @@ function setup(): void {
       kbdBtn.hidden = !showTouchUi;
       ptrBtn.hidden = !showTouchUi;
       fullBtn.hidden = s !== "connected" || !document.fullscreenEnabled;
-      if (s === "connected") canvas.focus();
+      if (s === "connected") {
+        pairRow.hidden = true;
+        canvas.focus();
+      }
       if (s === "closed" && wantConnection && !reconnectTimer) {
         stats.textContent = detail ?? "reconnecting…";
         reconnectTimer = setTimeout(() => {
@@ -89,7 +96,32 @@ function setup(): void {
       (window as unknown as Record<string, unknown>).__tetherLastClipboard = text;
       void hostClipboard.receive(text);
     },
+    onPairingRequired() {
+      showPairing("Enter the pairing code shown on the host");
+    },
+    onPairingFailed() {
+      showPairing("Wrong or expired code — try again");
+    },
   };
+
+  const pairRow = $<HTMLDivElement>("#pair");
+  const pairInput = $<HTMLInputElement>("#paircode");
+  const pairBtn = $<HTMLButtonElement>("#pairgo");
+  const showPairing = (msg: string) => {
+    pairRow.hidden = false;
+    pairInput.value = "";
+    stats.textContent = msg;
+    pairInput.focus();
+  };
+  const submitPair = () => {
+    const code = pairInput.value.trim();
+    if (code) active?.submitPairingCode(code);
+    stats.textContent = "pairing…";
+  };
+  pairBtn.addEventListener("click", submitPair);
+  pairInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitPair();
+  });
 
   const clipBtn = $<HTMLButtonElement>("#clip");
   const hostClipboard = new HostClipboard((visible) => {
@@ -118,7 +150,7 @@ function setup(): void {
     input?.cancelGesture();
     active?.close();
     if (modeSelect.value === "lan") {
-      const t = new TetherConnection(events);
+      const t = new TetherConnection(events, { deviceId, deviceName: deviceId });
       active = t;
       t.connect(hostInput.value.trim());
     } else {

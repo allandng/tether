@@ -122,6 +122,28 @@ describe("cross-implementation byte vectors (pin the wire format)", () => {
     const wire = encodeMessage({ type: "text", text: "hi" });
     expect(Array.from(wire)).toEqual([3, 0, 0, 0, 0x06, 0x68, 0x69]);
   });
+
+  it("Auth encodes to the Rust serde shape", () => {
+    const wire = encodeMessage({ type: "auth", deviceId: "hi", token: "ok" });
+    expect(Array.from(wire)).toEqual([9, 0, 0, 0, 0x09, 2, 0, 0x68, 0x69, 2, 0, 0x6f, 0x6b]);
+  });
+
+  it("decodes a host PairResult", () => {
+    // Rust: PairResult{ok:true, token:"ok"} → len 6
+    const res = decodeMessage(new Uint8Array([6, 0, 0, 0, 0x08, 1, 2, 0, 0x6f, 0x6b]));
+    expect(res).toEqual({ ok: true, message: { type: "pair_result", ok: true, token: "ok" } });
+  });
+
+  it("decodes a host AuthResult", () => {
+    expect(decodeMessage(new Uint8Array([2, 0, 0, 0, 0x0a, 1]))).toEqual({
+      ok: true,
+      message: { type: "auth_result", ok: true },
+    });
+    expect(decodeMessage(new Uint8Array([2, 0, 0, 0, 0x0a, 0]))).toEqual({
+      ok: true,
+      message: { type: "auth_result", ok: false },
+    });
+  });
 });
 
 describe("rejects corrupt input", () => {

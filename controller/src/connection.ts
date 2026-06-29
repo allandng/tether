@@ -2,15 +2,25 @@
 // Protocol logic lives in ProtocolSession; this file only owns the socket.
 
 import type { FrameData, InputEvent, Resolution } from "./protocol";
-import { ProtocolSession } from "./session";
+import { tokenStore, wsChannelBinding } from "./pairing";
+import { type AuthContext, ProtocolSession } from "./session";
 
 export type ConnectionStatus = "connecting" | "connected" | "closed";
+
+/** Stable per-browser identity used for pairing + signaling. */
+export interface Identity {
+  deviceId: string;
+  deviceName: string;
+}
 
 export interface ConnectionEvents {
   onStatus(status: ConnectionStatus, detail?: string): void;
   onResolution(resolution: Resolution): void;
   onFrame(frame: FrameData): void;
   onClipboard(text: string): void;
+  /** Host wants a pairing code entered. */
+  onPairingRequired(): void;
+  onPairingFailed(): void;
 }
 
 /** Common shape of all transports (WS today, WebRTC in webrtc.ts). */
@@ -19,6 +29,8 @@ export interface Transport {
   sendInput(ev: InputEvent): void;
   sendClipboard(text: string): void;
   sendText(text: string): void;
+  /** Submit a host pairing code (after onPairingRequired). */
+  submitPairingCode(code: string): void;
   readonly connected: boolean;
 }
 
@@ -26,7 +38,10 @@ export class TetherConnection implements Transport {
   private ws: WebSocket | null = null;
   private session: ProtocolSession | null = null;
 
-  constructor(private readonly events: ConnectionEvents) {}
+  constructor(
+    private readonly events: ConnectionEvents,
+    private readonly identity: Identity,
+  ) {}
 
   connect(hostPort: string): void {
     this.close();
@@ -42,17 +57,28 @@ export class TetherConnection implements Transport {
     this.ws = ws;
     ws.binaryType = "arraybuffer";
 
+    const authCtx: AuthContext = {
+      deviceId: this.identity.deviceId,
+      deviceName: this.identity.deviceName,
+      getToken: () => tokenStore.get(hostPort),
+      setToken: (t) => tokenStore.set(hostPort, t),
+      channelBinding: wsChannelBinding, // direct LAN link → constant binding
+    };
+
     const session = new ProtocolSession(
       {
         onConnected: () => this.events.onStatus("connected"),
         onResolution: (r) => this.events.onResolution(r),
         onFrame: (f) => this.events.onFrame(f),
         onClipboard: (text) => this.events.onClipboard(text),
+        onPairingRequired: () => this.events.onPairingRequired(),
+        onPairingFailed: () => this.events.onPairingFailed(),
         onProtocolError: (detail) => this.fail(detail),
       },
       (bytes) => {
         if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(bytes);
       },
+      authCtx,
     );
     this.session = session;
 
@@ -82,6 +108,10 @@ export class TetherConnection implements Transport {
 
   sendText(text: string): void {
     this.session?.sendText(text);
+  }
+
+  submitPairingCode(code: string): void {
+    void this.session?.submitPairingCode(code);
   }
 
   close(): void {

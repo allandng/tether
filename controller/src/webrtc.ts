@@ -13,8 +13,9 @@
 
 import { FrameReassembler, chunkFrame } from "./chunks";
 import type { ConnectionEvents, Transport } from "./connection";
+import { channelBinding, sdpFingerprint, tokenStore } from "./pairing";
 import { encodeClipboardData, type InputEvent } from "./protocol";
-import { ProtocolSession } from "./session";
+import { type AuthContext, ProtocolSession } from "./session";
 import { SignalingClient } from "./signaling";
 
 export interface RtcConfig {
@@ -49,12 +50,29 @@ export class WebRtcTransport implements Transport {
     });
     this.pc = pc;
 
+    const authCtx: AuthContext = {
+      deviceId: config.deviceId,
+      deviceName: config.deviceName,
+      getToken: () => tokenStore.get(config.targetHostId),
+      setToken: (t) => tokenStore.set(config.targetHostId, t),
+      // Bind the pairing proof to the negotiated DTLS fingerprints so a
+      // malicious signal relay that MITMs the connection can't pair itself.
+      channelBinding: async () => {
+        const local = pc.localDescription?.sdp ? sdpFingerprint(pc.localDescription.sdp) : null;
+        const remote = pc.remoteDescription?.sdp ? sdpFingerprint(pc.remoteDescription.sdp) : null;
+        if (local && remote) return channelBinding(local, remote);
+        return channelBinding("tether-no-fp", "tether-no-fp"); // matches host fallback
+      },
+    };
+
     const session = new ProtocolSession(
       {
         onConnected: () => this.events.onStatus("connected"),
         onResolution: (r) => this.events.onResolution(r),
         onFrame: (f) => this.events.onFrame(f),
         onClipboard: (text) => this.events.onClipboard(text),
+        onPairingRequired: () => this.events.onPairingRequired(),
+        onPairingFailed: () => this.events.onPairingFailed(),
         onProtocolError: (detail) => this.fail(detail),
       },
       (bytes) => {
@@ -62,6 +80,7 @@ export class WebRtcTransport implements Transport {
         // narrows ArrayBufferLike for RTCDataChannel.send's signature
         if (this.ctl?.readyState === "open") this.ctl.send(bytes as Uint8Array<ArrayBuffer>);
       },
+      authCtx,
     );
     this.session = session;
 
@@ -174,6 +193,10 @@ export class WebRtcTransport implements Transport {
   sendText(text: string): void {
     // Small committed text rides the reliable ctl channel via the session.
     this.session?.sendText(text);
+  }
+
+  submitPairingCode(code: string): void {
+    void this.session?.submitPairingCode(code);
   }
 
   close(): void {

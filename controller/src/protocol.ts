@@ -33,7 +33,13 @@ const enum MsgType {
   InputEvent = 0x04,
   ClipboardData = 0x05,
   TextInput = 0x06,
+  PairRequest = 0x07,
+  PairResult = 0x08,
+  Auth = 0x09,
+  AuthResult = 0x0a,
 }
+
+export const MAX_AUTH_FIELD_LEN = 512;
 
 const enum ClipboardKind {
   Text = 0,
@@ -88,7 +94,41 @@ export interface TextInput {
   text: string;
 }
 
-export type Message = Hello | Resolution | FrameData | InputEvent | ClipboardData | TextInput;
+export interface PairRequest {
+  type: "pair_request";
+  deviceId: string;
+  name: string;
+  proof: Uint8Array;
+}
+
+export interface PairResult {
+  type: "pair_result";
+  ok: boolean;
+  token: string;
+}
+
+export interface Auth {
+  type: "auth";
+  deviceId: string;
+  token: string;
+}
+
+export interface AuthResult {
+  type: "auth_result";
+  ok: boolean;
+}
+
+export type Message =
+  | Hello
+  | Resolution
+  | FrameData
+  | InputEvent
+  | ClipboardData
+  | TextInput
+  | PairRequest
+  | PairResult
+  | Auth
+  | AuthResult;
 
 export type DecodeResult =
   | { ok: true; message: Message }
@@ -219,6 +259,43 @@ export function encodeTextInput(t: Omit<TextInput, "type">): Uint8Array {
   );
 }
 
+/** Append a u16-length-prefixed field; returns bytes written. */
+function fieldLen(...parts: Uint8Array[]): number {
+  return parts.reduce((n, p) => n + 2 + p.length, 0);
+}
+function writeField(view: DataView, bytes: Uint8Array, at: number, field: Uint8Array): number {
+  view.setUint16(at, field.length, true);
+  bytes.set(field, at + 2);
+  return at + 2 + field.length;
+}
+
+export function encodePairRequest(p: Omit<PairRequest, "type">): Uint8Array {
+  const id = textEncoder.encode(p.deviceId);
+  const name = textEncoder.encode(p.name);
+  const cap = fieldLen(id, name, p.proof);
+  return finish((view, bytes) => {
+    view.setUint8(4, MsgType.PairRequest);
+    let at = 5;
+    at = writeField(view, bytes, at, id);
+    at = writeField(view, bytes, at, name);
+    at = writeField(view, bytes, at, p.proof);
+    return at - 4;
+  }, 1 + cap);
+}
+
+export function encodeAuth(a: Omit<Auth, "type">): Uint8Array {
+  const id = textEncoder.encode(a.deviceId);
+  const token = textEncoder.encode(a.token);
+  const cap = fieldLen(id, token);
+  return finish((view, bytes) => {
+    view.setUint8(4, MsgType.Auth);
+    let at = 5;
+    at = writeField(view, bytes, at, id);
+    at = writeField(view, bytes, at, token);
+    return at - 4;
+  }, 1 + cap);
+}
+
 export function encodeMessage(m: Message): Uint8Array {
   switch (m.type) {
     case "hello":
@@ -233,6 +310,14 @@ export function encodeMessage(m: Message): Uint8Array {
       return encodeClipboardData(m);
     case "text":
       return encodeTextInput(m);
+    case "pair_request":
+      return encodePairRequest(m);
+    case "auth":
+      return encodeAuth(m);
+    case "pair_result":
+    case "auth_result":
+      // host→controller only; the controller never sends these
+      throw new Error(`controller does not send ${m.type}`);
   }
 }
 
@@ -308,6 +393,23 @@ export function decodeMessage(data: ArrayBuffer | Uint8Array): DecodeResult {
       }
       return ok({ type: "text", text });
     }
+    case MsgType.PairResult: {
+      if (payloadLen < 1) return corrupt("empty PairResult");
+      const okFlag = view.getUint8(5) !== 0;
+      const r = readField(bytes, view, 6);
+      if (!r) return corrupt("bad PairResult token");
+      let token: string;
+      try {
+        token = textDecoder.decode(r.field);
+      } catch {
+        return corrupt("PairResult token not UTF-8");
+      }
+      return ok({ type: "pair_result", ok: okFlag, token });
+    }
+    case MsgType.AuthResult: {
+      if (payloadLen !== 1) return corrupt("bad AuthResult length");
+      return ok({ type: "auth_result", ok: view.getUint8(5) !== 0 });
+    }
     default:
       return { ok: false, reason: "unknown-type", msgType };
   }
@@ -371,6 +473,18 @@ function decodeInputEvent(view: DataView, bytes: Uint8Array, payloadLen: number)
     default:
       return corrupt("bad input kind");
   }
+}
+
+/** Read a u16-length-prefixed field at `at`; null if it overruns the buffer. */
+function readField(
+  bytes: Uint8Array,
+  view: DataView,
+  at: number,
+): { field: Uint8Array; next: number } | null {
+  if (at + 2 > bytes.length) return null;
+  const len = view.getUint16(at, true);
+  if (len > MAX_AUTH_FIELD_LEN || at + 2 + len > bytes.length) return null;
+  return { field: bytes.subarray(at + 2, at + 2 + len), next: at + 2 + len };
 }
 
 // JS numbers are exact up to 2^53; epoch-microsecond timestamps stay well
