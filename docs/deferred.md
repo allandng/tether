@@ -64,3 +64,13 @@ each got the simplest choice that doesn't block Phase 2.
 | **Signal-server TLS** | Plain `ws://`; the relay sees SDP/ICE (not media). Pairing resists an active MITM, but signaling metadata + the coarse secret are cleartext. | Before any internet-exposed signal server: `wss://` via a reverse proxy. |
 | **AIMD seed-from-last + skip-for-JPEG** | The controller re-pins to the ceiling each session and the AIMD loop runs (harmlessly) even for JPEG. | Polish: seed from the last converged target; skip the loop when codec≠h264. |
 | **multi-monitor / client-drawn cursor / multiple controllers** | Carried over from the original Phase 5 scope; the secure-internet slice deferred them. | Phase 5b. |
+
+## Phase 5b additions
+
+| Decision | Phase 5b choice | Revisit when |
+|---|---|---|
+| **Live multi-display switching** | Code-complete (enumerate + live `update_content_filter` switch + active-display input mapping) but unverifiable on a one-display machine. | A real multi-monitor Mac. |
+| **Concurrent-input arbitration** | With `--max-controllers >1`, all controllers' input merges into one injector and interleaves; held inputs are released on disconnect but not partitioned per controller. | If shared control gets confusing; add per-session input state or a control token. |
+| **Display-switch flapping** | Any controller can switch the shared active display (last-wins); N controllers could fight. | Add a view-owner / arbitration if it bites. |
+| **Switch stalls capture thread** | `switch_display` blocks the capture thread on a synchronous SCK reconfigure (rare, user-initiated); a pathological SCK hang would stall frames. | Bound/offload the reconfigure off the frame thread. |
+| **displays() double-enumerate on switch** | `switch_display` and the republish each call `SCShareableContent::get()` — minor redundant work on a rare action. | If switching feels slow; return the list from `switch_display`. |
