@@ -289,7 +289,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             broadcast_peers(&devices);
         }
     }
-    send_task.abort();
+    // Let the outbound pump FLUSH any queued terminal message (a BadAuth or
+    // Replaced error) before the socket closes — otherwise the client can't
+    // tell a fatal refusal (don't retry) from a transient drop. Dropping every
+    // sender (local + the device-map clone removed above) ends the pump; the
+    // timeout guards against a lingering clone.
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(1), send_task).await;
 }
 
 fn broadcast_peers(devices: &HashMap<String, Device>) {
