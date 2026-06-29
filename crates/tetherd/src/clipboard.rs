@@ -5,8 +5,8 @@
 
 use std::time::Duration;
 
-use tokio::sync::watch;
 use tether_protocol::MAX_CLIPBOARD_LEN;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 /// Platform clipboard. Implementations are constructed on the sync thread
@@ -96,7 +96,10 @@ where
         })?;
 
     let _ = ready_rx.recv_timeout(Duration::from_secs(2));
-    Ok(ClipboardSync { outbound: out_rx, inbound_tx: in_tx })
+    Ok(ClipboardSync {
+        outbound: out_rx,
+        inbound_tx: in_tx,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -154,7 +157,10 @@ mod tests {
         let mut rx = sync.outbound.clone();
 
         board.external_copy("hello from host");
-        assert_eq!(next_outbound(&mut rx).await.as_deref(), Some("hello from host"));
+        assert_eq!(
+            next_outbound(&mut rx).await.as_deref(),
+            Some("hello from host")
+        );
 
         // no churn: nothing further arrives while the clipboard is idle
         let quiet = tokio::time::timeout(Duration::from_millis(1500), rx.changed()).await;

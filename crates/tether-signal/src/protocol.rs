@@ -57,13 +57,29 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     /// Registration accepted; carries the ICE servers (STUN + ephemeral TURN)
     /// the peer should use for its `RTCPeerConnection`.
-    Registered { ice_servers: Vec<IceServer> },
+    Registered {
+        ice_servers: Vec<IceServer>,
+    },
     /// Full directory snapshot, broadcast on every join/leave.
-    Peers { peers: Vec<PeerInfo> },
-    Offer { from: String, sdp: String },
-    Answer { from: String, sdp: String },
-    Ice { from: String, candidate: String },
-    Error { code: ErrorCode, message: String },
+    Peers {
+        peers: Vec<PeerInfo>,
+    },
+    Offer {
+        from: String,
+        sdp: String,
+    },
+    Answer {
+        from: String,
+        sdp: String,
+    },
+    Ice {
+        from: String,
+        candidate: String,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +107,12 @@ mod tests {
         )
         .unwrap();
         match register {
-            ClientMessage::Register { device_id, caps, auth, .. } => {
+            ClientMessage::Register {
+                device_id,
+                caps,
+                auth,
+                ..
+            } => {
                 assert_eq!(device_id, "ipad");
                 assert!(!caps.can_host);
                 assert!(caps.can_control);

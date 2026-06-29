@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use tokio::sync::watch;
 use tether_protocol::{DisplayInfo, Resolution};
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::capture::{EncodedFrame, FrameEncoder, ScreenCapturer};
@@ -41,7 +41,10 @@ where
     C: ScreenCapturer,
     E: FrameEncoder,
 {
-    let (resolution_tx, resolution_rx) = watch::channel(Resolution { width: 0, height: 0 });
+    let (resolution_tx, resolution_rx) = watch::channel(Resolution {
+        width: 0,
+        height: 0,
+    });
     let (frames_tx, frames_rx) = watch::channel(None);
     let (displays_tx, displays_rx) = watch::channel(Vec::<DisplayInfo>::new());
     let (select_tx, select_rx) = std::sync::mpsc::channel::<u32>();
@@ -74,7 +77,7 @@ where
                             Ok(c) => break c,
                             Err(e) => {
                                 attempts += 1;
-                                if attempts % 20 == 0 {
+                                if attempts.is_multiple_of(20) {
                                     warn!(error = %e, "still waiting for a display to capture");
                                 }
                             }
@@ -90,7 +93,11 @@ where
             let mut resolution = capturer.resolution();
             let _ = resolution_tx.send(resolution);
             let _ = displays_tx.send(capturer.displays());
-            info!(width = resolution.width, height = resolution.height, "capture started");
+            info!(
+                width = resolution.width,
+                height = resolution.height,
+                "capture started"
+            );
 
             let mut seq: u32 = 0;
             loop {
@@ -117,7 +124,10 @@ where
                         return;
                     }
                 };
-                let current = Resolution { width: raw.width, height: raw.height };
+                let current = Resolution {
+                    width: raw.width,
+                    height: raw.height,
+                };
                 if current != resolution {
                     info!(?current, "capture resolution changed");
                     resolution = current;
@@ -160,7 +170,8 @@ where
 
 #[cfg(target_os = "macos")]
 fn is_transient(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<crate::capture::macos::NoDisplays>().is_some()
+    e.downcast_ref::<crate::capture::macos::NoDisplays>()
+        .is_some()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -181,7 +192,10 @@ mod tests {
 
     impl ScreenCapturer for FakeCapturer {
         fn resolution(&self) -> Resolution {
-            Resolution { width: 64, height: 48 }
+            Resolution {
+                width: 64,
+                height: 48,
+            }
         }
         fn next_frame(&mut self) -> anyhow::Result<RawFrame> {
             if self.frames_left == 0 {
@@ -211,11 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_publishes_resolution_and_frames() {
-        let pipeline = start(
-            || Ok(FakeCapturer { frames_left: 3 }),
-            || Ok(FakeEncoder),
-        )
-        .unwrap();
+        let pipeline = start(|| Ok(FakeCapturer { frames_left: 3 }), || Ok(FakeEncoder)).unwrap();
 
         let mut resolution = pipeline.resolution.clone();
         let mut frames = pipeline.frames.clone();
@@ -226,7 +236,10 @@ mod tests {
         }
         assert_eq!(
             *resolution.borrow(),
-            Resolution { width: 64, height: 48 }
+            Resolution {
+                width: 64,
+                height: 48
+            }
         );
 
         frames.changed().await.unwrap();

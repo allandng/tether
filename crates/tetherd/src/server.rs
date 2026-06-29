@@ -2,9 +2,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::Context;
+use tether_protocol::Resolution;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
-use tether_protocol::Resolution;
 use tracing::{info, warn};
 
 use crate::auth::PairingAuth;
@@ -72,7 +72,11 @@ impl Server {
             .await
             .with_context(|| format!("failed to bind {bind}:{port}"))?;
         info!(addr = %listener.local_addr()?, "listening");
-        Ok(Server { listener, allow, state })
+        Ok(Server {
+            listener,
+            allow,
+            state,
+        })
     }
 
     pub fn local_addr(&self) -> anyhow::Result<SocketAddr> {
@@ -105,7 +109,10 @@ impl Server {
                     warn!(%peer, error = %e, "session ended with error");
                 }
                 // release anything this controller held (mid-drag disconnect)
-                let _ = state.input_tx.send(crate::input::InjectCommand::ReleaseAll).await;
+                let _ = state
+                    .input_tx
+                    .send(crate::input::InjectCommand::ReleaseAll)
+                    .await;
             });
         }
     }

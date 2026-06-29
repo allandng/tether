@@ -59,7 +59,7 @@ mod user_activity {
 
 pub struct MacInjector {
     source: CGEventSource,
-    bounds: CGRect, // active display, in points
+    bounds: CGRect,  // active display, in points
     display_id: u32, // active display (normalized coords map onto this)
     pos: CGPoint,
     held: [bool; 3], // left, middle, right
@@ -157,10 +157,8 @@ impl InputInjector for MacInjector {
                 let event =
                     CGEvent::new_mouse_event(self.source.clone(), event_type, self.pos, cg_button)
                         .map_err(|()| anyhow!("failed to create mouse event"))?;
-                event.set_integer_value_field(
-                    EventField::MOUSE_EVENT_CLICK_STATE,
-                    self.click_state,
-                );
+                event
+                    .set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, self.click_state);
                 event.set_flags(self.flags);
                 event.post(CGEventTapLocation::HID);
             }
@@ -171,10 +169,8 @@ impl InputInjector for MacInjector {
                 let event =
                     CGEvent::new_mouse_event(self.source.clone(), event_type, self.pos, cg_button)
                         .map_err(|()| anyhow!("failed to create mouse event"))?;
-                event.set_integer_value_field(
-                    EventField::MOUSE_EVENT_CLICK_STATE,
-                    self.click_state,
-                );
+                event
+                    .set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, self.click_state);
                 event.set_flags(self.flags);
                 event.post(CGEventTapLocation::HID);
             }
@@ -193,7 +189,10 @@ impl InputInjector for MacInjector {
                 event.set_flags(self.flags);
                 event.post(CGEventTapLocation::HID);
             }
-            InputEvent::KeyDown { ref code, modifiers: mask } => {
+            InputEvent::KeyDown {
+                ref code,
+                modifiers: mask,
+            } => {
                 let Some(vk) = keymap::dom_code_to_vk(code) else {
                     debug!(code, "no macOS virtual key for DOM code, dropping");
                     return Ok(());
@@ -208,7 +207,10 @@ impl InputInjector for MacInjector {
                 event.set_flags(self.flags | mask_to_flags(mask));
                 event.post(CGEventTapLocation::HID);
             }
-            InputEvent::KeyUp { ref code, modifiers: mask } => {
+            InputEvent::KeyUp {
+                ref code,
+                modifiers: mask,
+            } => {
                 let Some(vk) = keymap::dom_code_to_vk(code) else {
                     return Ok(());
                 };
@@ -337,7 +339,10 @@ mod tests {
     use super::*;
 
     fn bounds(w: f64, h: f64) -> CGRect {
-        CGRect::new(&CGPoint::new(0.0, 0.0), &core_graphics::geometry::CGSize::new(w, h))
+        CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &core_graphics::geometry::CGSize::new(w, h),
+        )
     }
 
     #[test]
@@ -374,6 +379,9 @@ mod tests {
             modifier_flag_for_vk(keymap::dom_code_to_vk("ShiftRight").unwrap()),
             Some(CGEventFlags::CGEventFlagShift)
         );
-        assert_eq!(modifier_flag_for_vk(keymap::dom_code_to_vk("KeyA").unwrap()), None);
+        assert_eq!(
+            modifier_flag_for_vk(keymap::dom_code_to_vk("KeyA").unwrap()),
+            None
+        );
     }
 }

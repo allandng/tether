@@ -36,7 +36,13 @@ pub trait ScreenCapturer: Send {
     /// current resolution (fine for fakes and single-display platforms).
     fn displays(&self) -> Vec<DisplayInfo> {
         let r = self.resolution();
-        vec![DisplayInfo { id: 0, width: r.width, height: r.height, active: true, name: "Display".into() }]
+        vec![DisplayInfo {
+            id: 0,
+            width: r.width,
+            height: r.height,
+            active: true,
+            name: "Display".into(),
+        }]
     }
 
     /// Switch the active capture to `id`. Default: only the implicit id 0 is

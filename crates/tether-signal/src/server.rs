@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
+use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::any;
-use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
@@ -52,7 +52,9 @@ impl AppState {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new().route("/ws", any(ws_upgrade)).with_state(state)
+    Router::new()
+        .route("/ws", any(ws_upgrade))
+        .with_state(state)
 }
 
 async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
@@ -67,7 +69,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // (a newer connection took this device_id), so close after sending it.
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let is_kick = matches!(&msg, ServerMessage::Error { code: ErrorCode::Replaced, .. });
+            let is_kick = matches!(
+                &msg,
+                ServerMessage::Error {
+                    code: ErrorCode::Replaced,
+                    ..
+                }
+            );
             let json = match serde_json::to_string(&msg) {
                 Ok(j) => j,
                 Err(_) => continue,
@@ -100,7 +108,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             }
         };
         match parsed {
-            ClientMessage::Register { device_id, name, caps, auth } => {
+            ClientMessage::Register {
+                device_id,
+                name,
+                caps,
+                auth,
+            } => {
                 if auth != state.secret {
                     warn!(%device_id, "registration with bad secret refused");
                     let _ = tx.send(ServerMessage::Error {
@@ -112,7 +125,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 let mut devices = state.devices.lock().await;
                 if let Some(old) = devices.insert(
                     device_id.clone(),
-                    Device { name: name.clone(), caps, conn_id, tx: tx.clone() },
+                    Device {
+                        name: name.clone(),
+                        caps,
+                        conn_id,
+                        tx: tx.clone(),
+                    },
                 ) {
                     info!(%device_id, "replacing stale registration");
                     let _ = old.tx.send(ServerMessage::Error {
@@ -138,7 +156,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 let devices = state.devices.lock().await;
                 // Directory-level capability enforcement (gate criterion):
                 // only controllers may offer, only hosts may be offered to.
-                if !devices.get(&from).map(|d| d.caps.can_control).unwrap_or(false) {
+                if !devices
+                    .get(&from)
+                    .map(|d| d.caps.can_control)
+                    .unwrap_or(false)
+                {
                     let _ = tx.send(ServerMessage::Error {
                         code: ErrorCode::NotController,
                         message: "this device cannot control".into(),
@@ -215,7 +237,9 @@ fn broadcast_peers(devices: &HashMap<String, Device>) {
         })
         .collect();
     for device in devices.values() {
-        let _ = device.tx.send(ServerMessage::Peers { peers: peers.clone() });
+        let _ = device.tx.send(ServerMessage::Peers {
+            peers: peers.clone(),
+        });
     }
 }
 

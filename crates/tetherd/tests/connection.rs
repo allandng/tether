@@ -7,11 +7,9 @@ use std::net::SocketAddr;
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, watch};
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
     Auth, AuthResult, CAP_CAN_CONTROL, CAP_CAN_HOST, ClipboardData, Codec, Decoded, Hello,
-    InputEvent, Message, MouseButton, PairRequest, PairResult, PROTOCOL_VERSION, Resolution, Role,
+    InputEvent, Message, MouseButton, PROTOCOL_VERSION, PairRequest, PairResult, Resolution, Role,
     TextInput,
 };
 use tetherd::auth::{PairingAuth, pairing_proof};
@@ -19,6 +17,8 @@ use tetherd::capture::EncodedFrame;
 use tetherd::input::InjectCommand;
 use tetherd::server::{AuthPolicy, Server, ServerState};
 use tetherd::session::ws_channel_binding;
+use tokio::sync::{mpsc, watch};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 struct TestHost {
     addr: SocketAddr,
@@ -43,7 +43,11 @@ impl Drop for TestHost {
 
 async fn start_host() -> TestHost {
     // gate off by default (allow_unpaired) — pairing has its own test
-    start_host_with(AuthPolicy { require_pairing: false, allow_unpaired: true }).await
+    start_host_with(AuthPolicy {
+        require_pairing: false,
+        allow_unpaired: true,
+    })
+    .await
 }
 
 fn temp_auth_dir() -> std::path::PathBuf {
@@ -58,8 +62,10 @@ async fn start_host_with(policy: AuthPolicy) -> TestHost {
 }
 
 async fn start_host_slots(policy: AuthPolicy, slots: usize) -> TestHost {
-    let (resolution_tx, resolution_rx) =
-        watch::channel(Resolution { width: 1920, height: 1080 });
+    let (resolution_tx, resolution_rx) = watch::channel(Resolution {
+        width: 1920,
+        height: 1080,
+    });
     let (frames_tx, frames_rx) = watch::channel(None);
     let (input_tx, input_rx) = mpsc::channel(64);
     let (clipboard_out_tx, clipboard_out_rx) = watch::channel(None);
@@ -108,9 +114,8 @@ async fn start_host_slots(policy: AuthPolicy, slots: usize) -> TestHost {
     }
 }
 
-type Client = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Client =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(addr: SocketAddr) -> Client {
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
@@ -157,7 +162,14 @@ async fn handshake(ws: &mut Client) {
     assert_ne!(h.capabilities & CAP_CAN_HOST, 0);
     // auth gate: controller always sends Auth after Hello (token empty when the
     // gate is off, as in these tests) and gets AuthResult{ok:true}.
-    send_msg(ws, &Message::Auth(Auth { device_id: "test".into(), token: String::new() })).await;
+    send_msg(
+        ws,
+        &Message::Auth(Auth {
+            device_id: "test".into(),
+            token: String::new(),
+        }),
+    )
+    .await;
     let Some(Message::AuthResult(ar)) = next_message(ws).await else {
         panic!("expected AuthResult after Auth");
     };
@@ -190,7 +202,11 @@ async fn handshake_then_frames_then_input() {
     assert_eq!(&f.payload[..], b"fakejpeg");
 
     // controller sends input -> host receives it on the injector channel
-    let ev = InputEvent::MouseDown { button: MouseButton::Left, x: 100, y: 200 };
+    let ev = InputEvent::MouseDown {
+        button: MouseButton::Left,
+        x: 100,
+        y: 200,
+    };
     ws.send(WsMessage::Binary(Message::InputEvent(ev.clone()).encode()))
         .await
         .unwrap();
@@ -203,21 +219,42 @@ async fn handshake_then_frames_then_input() {
 /// revocation locks it back out.
 #[tokio::test]
 async fn pairing_lifecycle() {
-    let host = start_host_with(AuthPolicy { require_pairing: true, allow_unpaired: false }).await;
+    let host = start_host_with(AuthPolicy {
+        require_pairing: true,
+        allow_unpaired: false,
+    })
+    .await;
 
     // 1. connect; Hello exchange; an empty-token Auth is refused (gate active)
     let mut ws = connect(host.addr).await;
     ws.send(controller_hello()).await.unwrap();
-    assert!(matches!(next_message(&mut ws).await, Some(Message::Hello(_))));
-    send_msg(&mut ws, &Message::Auth(Auth { device_id: "ipad".into(), token: String::new() })).await;
-    assert_eq!(next_message(&mut ws).await, Some(Message::AuthResult(AuthResult { ok: false })));
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Hello(_))
+    ));
+    send_msg(
+        &mut ws,
+        &Message::Auth(Auth {
+            device_id: "ipad".into(),
+            token: String::new(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        next_message(&mut ws).await,
+        Some(Message::AuthResult(AuthResult { ok: false }))
+    );
 
     // 2. arm a code on the host and pair with a channel-bound proof
     let code = host.auth.lock().await.arm(tetherd::auth::now_unix());
     let proof = pairing_proof(&code, &ws_channel_binding());
     send_msg(
         &mut ws,
-        &Message::PairRequest(PairRequest { device_id: "ipad".into(), name: "iPad".into(), proof }),
+        &Message::PairRequest(PairRequest {
+            device_id: "ipad".into(),
+            name: "iPad".into(),
+            proof,
+        }),
     )
     .await;
     let token = match next_message(&mut ws).await {
@@ -225,36 +262,75 @@ async fn pairing_lifecycle() {
         other => panic!("expected PairResult ok, got {other:?}"),
     };
     // pairing authenticates this session → Resolution follows
-    assert!(matches!(next_message(&mut ws).await, Some(Message::Resolution(_))));
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Resolution(_))
+    ));
     drop(ws);
 
     // 3. reconnect with the token → authenticated, no code needed
     let mut ws = connect(host.addr).await;
     ws.send(controller_hello()).await.unwrap();
-    assert!(matches!(next_message(&mut ws).await, Some(Message::Hello(_))));
-    send_msg(&mut ws, &Message::Auth(Auth { device_id: "ipad".into(), token: token.clone() })).await;
-    assert_eq!(next_message(&mut ws).await, Some(Message::AuthResult(AuthResult { ok: true })));
-    assert!(matches!(next_message(&mut ws).await, Some(Message::Resolution(_))));
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Hello(_))
+    ));
+    send_msg(
+        &mut ws,
+        &Message::Auth(Auth {
+            device_id: "ipad".into(),
+            token: token.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        next_message(&mut ws).await,
+        Some(Message::AuthResult(AuthResult { ok: true }))
+    );
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Resolution(_))
+    ));
     drop(ws);
 
     // 4. revoke → the same token is rejected
     assert!(host.auth.lock().await.revoke("ipad").unwrap());
     let mut ws = connect(host.addr).await;
     ws.send(controller_hello()).await.unwrap();
-    assert!(matches!(next_message(&mut ws).await, Some(Message::Hello(_))));
-    send_msg(&mut ws, &Message::Auth(Auth { device_id: "ipad".into(), token })).await;
-    assert_eq!(next_message(&mut ws).await, Some(Message::AuthResult(AuthResult { ok: false })));
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Hello(_))
+    ));
+    send_msg(
+        &mut ws,
+        &Message::Auth(Auth {
+            device_id: "ipad".into(),
+            token,
+        }),
+    )
+    .await;
+    assert_eq!(
+        next_message(&mut ws).await,
+        Some(Message::AuthResult(AuthResult { ok: false }))
+    );
 }
 
 /// A wrong pairing code is consumed on the first attempt (no brute force).
 #[tokio::test]
 async fn wrong_pairing_code_is_single_use() {
-    let host = start_host_with(AuthPolicy { require_pairing: true, allow_unpaired: false }).await;
+    let host = start_host_with(AuthPolicy {
+        require_pairing: true,
+        allow_unpaired: false,
+    })
+    .await;
     host.auth.lock().await.arm(tetherd::auth::now_unix());
 
     let mut ws = connect(host.addr).await;
     ws.send(controller_hello()).await.unwrap();
-    assert!(matches!(next_message(&mut ws).await, Some(Message::Hello(_))));
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Hello(_))
+    ));
     // a bad proof
     send_msg(
         &mut ws,
@@ -267,7 +343,10 @@ async fn wrong_pairing_code_is_single_use() {
     .await;
     assert_eq!(
         next_message(&mut ws).await,
-        Some(Message::PairResult(PairResult { ok: false, token: String::new() })),
+        Some(Message::PairResult(PairResult {
+            ok: false,
+            token: String::new()
+        })),
     );
     // host closes the session after a failed pairing
     assert_eq!(next_message(&mut ws).await, None);
@@ -280,7 +359,10 @@ async fn text_input_relays_to_injector() {
     handshake(&mut ws).await;
 
     ws.send(WsMessage::Binary(
-        Message::TextInput(TextInput { text: "señor 🎯".into() }).encode(),
+        Message::TextInput(TextInput {
+            text: "señor 🎯".into(),
+        })
+        .encode(),
     ))
     .await
     .unwrap();
@@ -295,7 +377,9 @@ async fn clipboard_relays_both_directions() {
     handshake(&mut ws).await;
 
     // host -> controller
-    host.clipboard_out_tx.send(Some("copied on host".into())).unwrap();
+    host.clipboard_out_tx
+        .send(Some("copied on host".into()))
+        .unwrap();
     match next_message(&mut ws).await {
         Some(Message::ClipboardData(c)) => assert_eq!(c.text, "copied on host"),
         other => panic!("expected ClipboardData, got {other:?}"),
@@ -303,7 +387,10 @@ async fn clipboard_relays_both_directions() {
 
     // controller -> host
     ws.send(WsMessage::Binary(
-        Message::ClipboardData(ClipboardData { text: "copied on controller".into() }).encode(),
+        Message::ClipboardData(ClipboardData {
+            text: "copied on controller".into(),
+        })
+        .encode(),
     ))
     .await
     .unwrap();
@@ -337,7 +424,10 @@ async fn clean_disconnect_then_reconnect_without_restart() {
             break;
         }
     }
-    assert!(reconnected, "server must accept a new session after disconnect");
+    assert!(
+        reconnected,
+        "server must accept a new session after disconnect"
+    );
 }
 
 #[tokio::test]
@@ -374,16 +464,36 @@ async fn select_display_routes_to_capture() {
     // host announces a multi-display set → controller can pick
     host.displays_tx
         .send(vec![
-            tether_protocol::DisplayInfo { id: 1, width: 1920, height: 1080, active: true, name: "1".into() },
-            tether_protocol::DisplayInfo { id: 7, width: 2560, height: 1440, active: false, name: "2".into() },
+            tether_protocol::DisplayInfo {
+                id: 1,
+                width: 1920,
+                height: 1080,
+                active: true,
+                name: "1".into(),
+            },
+            tether_protocol::DisplayInfo {
+                id: 7,
+                width: 2560,
+                height: 1440,
+                active: false,
+                name: "2".into(),
+            },
         ])
         .unwrap();
-    assert!(matches!(next_message(&mut ws).await, Some(Message::Displays(_))));
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Displays(_))
+    ));
 
     // controller selects display 7 → host routes it to the capture thread
-    send_msg(&mut ws, &Message::SelectDisplay(tether_protocol::SelectDisplay { id: 7 })).await;
+    send_msg(
+        &mut ws,
+        &Message::SelectDisplay(tether_protocol::SelectDisplay { id: 7 }),
+    )
+    .await;
     let routed = tokio::task::spawn_blocking(move || {
-        host.select_display_rx.recv_timeout(std::time::Duration::from_secs(2))
+        host.select_display_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
     })
     .await
     .unwrap()
@@ -394,8 +504,14 @@ async fn select_display_routes_to_capture() {
 #[tokio::test]
 async fn multiple_controllers_up_to_the_cap() {
     // --max-controllers 2: two connect concurrently, a third is refused.
-    let mut host =
-        start_host_slots(AuthPolicy { require_pairing: false, allow_unpaired: true }, 2).await;
+    let mut host = start_host_slots(
+        AuthPolicy {
+            require_pairing: false,
+            allow_unpaired: true,
+        },
+        2,
+    )
+    .await;
     let mut a = connect(host.addr).await;
     handshake(&mut a).await;
     let mut b = connect(host.addr).await;
@@ -411,7 +527,10 @@ async fn multiple_controllers_up_to_the_cap() {
         }))
         .unwrap();
     for ws in [&mut a, &mut b] {
-        assert!(matches!(next_message(ws).await, Some(Message::FrameData(_))));
+        assert!(matches!(
+            next_message(ws).await,
+            Some(Message::FrameData(_))
+        ));
     }
 
     // a third over the cap is refused — the server drops the socket before (or
@@ -431,15 +550,17 @@ async fn multiple_controllers_up_to_the_cap() {
     ))
     .await
     .unwrap();
-    assert!(matches!(host.input_rx.recv().await, Some(InjectCommand::Event(_))));
+    assert!(matches!(
+        host.input_rx.recv().await,
+        Some(InjectCommand::Event(_))
+    ));
 
     // freeing a slot lets a new controller in
     drop(a);
     let mut admitted = false;
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let Ok((mut ws, _)) =
-            tokio_tungstenite::connect_async(format!("ws://{}", host.addr)).await
+        let Ok((mut ws, _)) = tokio_tungstenite::connect_async(format!("ws://{}", host.addr)).await
         else {
             continue;
         };

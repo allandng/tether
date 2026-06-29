@@ -9,14 +9,16 @@ fn main() -> anyhow::Result<()> {
     use core_graphics::display::CGDisplay;
     use core_graphics::event::CGEvent;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use tether_protocol::InputEvent;
     use tetherd::input::InputInjector;
     use tetherd::input::macos::{MacInjector, normalized_to_point};
-    use tether_protocol::InputEvent;
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|()| anyhow::anyhow!("no event source"))?;
     let cursor = |s: &CGEventSource| {
-        CGEvent::new(s.clone()).map(|e| e.location()).map_err(|()| anyhow::anyhow!("no event"))
+        CGEvent::new(s.clone())
+            .map(|e| e.location())
+            .map_err(|()| anyhow::anyhow!("no event"))
     };
     let original = cursor(&source)?;
 
@@ -29,7 +31,10 @@ fn main() -> anyhow::Result<()> {
     let bounds = CGDisplay::main().bounds();
     let back_x = ((original.x - bounds.origin.x) / bounds.size.width * 65535.0) as u16;
     let back_y = ((original.y - bounds.origin.y) / bounds.size.height * 65535.0) as u16;
-    injector.inject(&InputEvent::MouseMove { x: back_x, y: back_y })?;
+    injector.inject(&InputEvent::MouseMove {
+        x: back_x,
+        y: back_y,
+    })?;
 
     let expected = normalized_to_point(&bounds, 32768, 32768);
     let (dx, dy) = (moved.x - expected.x, moved.y - expected.y);

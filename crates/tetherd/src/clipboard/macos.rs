@@ -14,7 +14,9 @@ pub struct MacClipboard {
 
 impl MacClipboard {
     pub fn new() -> Self {
-        MacClipboard { pasteboard: NSPasteboard::generalPasteboard() }
+        MacClipboard {
+            pasteboard: NSPasteboard::generalPasteboard(),
+        }
     }
 }
 
@@ -41,7 +43,10 @@ impl Clipboard for MacClipboard {
         // protocol); both are valid calls on the general pasteboard.
         unsafe {
             let _ = self.pasteboard.clearContents();
-            if !self.pasteboard.setString_forType(&ns, NSPasteboardTypeString) {
+            if !self
+                .pasteboard
+                .setString_forType(&ns, NSPasteboardTypeString)
+            {
                 tracing::warn!("NSPasteboard setString failed");
             }
             // Read back rather than guess how many bumps the write produced.

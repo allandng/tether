@@ -1,16 +1,15 @@
 use clap::Parser;
-use tokio::sync::mpsc;
 use tetherd::config::Args;
 use tetherd::input::InjectCommand;
 use tetherd::server::{Server, ServerState};
+use tokio::sync::mpsc;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -28,13 +27,19 @@ async fn main() -> anyhow::Result<()> {
     if args.pair {
         let code = pairing.arm(tetherd::auth::now_unix());
         info!("pairing armed (valid 5 min) — enter this code on the controller:");
-        println!("\n    Pairing code:  {}\n", tetherd::auth::group_code(&code));
+        println!(
+            "\n    Pairing code:  {}\n",
+            tetherd::auth::group_code(&code)
+        );
     }
     if args.allow_unpaired {
         tracing::warn!("--allow-unpaired: device pairing is NOT enforced (dev/LAN only)");
     }
     if !pairing.is_empty() {
-        info!(devices = pairing.paired_devices().len(), "paired devices loaded; auth required");
+        info!(
+            devices = pairing.paired_devices().len(),
+            "paired devices loaded; auth required"
+        );
     }
     let auth = std::sync::Arc::new(tokio::sync::Mutex::new(pairing));
 
@@ -68,9 +73,10 @@ async fn main() -> anyhow::Result<()> {
 
     let rtc = match args.signal_url() {
         Some(signal_url) => {
-            let device_id = args.device_id.clone().unwrap_or_else(|| {
-                gethostname::gethostname().to_string_lossy().into_owned()
-            });
+            let device_id = args
+                .device_id
+                .clone()
+                .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
             info!(%device_id, %signal_url, "webrtc transport enabled");
             let config = tetherd::webrtc::RtcConfig {
                 signal_url,
@@ -114,7 +120,9 @@ fn start_capture(
         move || -> anyhow::Result<Box<dyn FrameEncoder>> {
             Ok(match codec {
                 CodecArg::Jpeg => Box::new(tetherd::encode::JpegEncoder::new(75)?),
-                CodecArg::H264 => Box::new(tetherd::encode::h264::VtH264Encoder::new(bitrate_kbps)?),
+                CodecArg::H264 => {
+                    Box::new(tetherd::encode::h264::VtH264Encoder::new(bitrate_kbps)?)
+                }
             })
         },
     )
@@ -125,7 +133,9 @@ fn start_capture(
     _codec: tetherd::config::CodecArg,
     _bitrate_kbps: u32,
 ) -> anyhow::Result<tetherd::pipeline::Pipeline> {
-    anyhow::bail!("no screen capture implementation for this platform yet (Phase 1 hosts macOS only)")
+    anyhow::bail!(
+        "no screen capture implementation for this platform yet (Phase 1 hosts macOS only)"
+    )
 }
 
 /// Drain input events onto a dedicated thread; the injector is built there
@@ -177,7 +187,9 @@ fn start_injector(
 
 #[cfg(target_os = "macos")]
 fn start_clipboard() -> anyhow::Result<tetherd::clipboard::ClipboardSync> {
-    Ok(tetherd::clipboard::start(tetherd::clipboard::macos::MacClipboard::new)?)
+    Ok(tetherd::clipboard::start(
+        tetherd::clipboard::macos::MacClipboard::new,
+    )?)
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
+use tether_protocol::{
+    AuthResult, CAP_CAN_CONTROL, CAP_CAN_HOST, ClipboardData, Decoded, Displays, FrameData, Hello,
+    Message, PROTOCOL_VERSION, PairResult, Role,
+};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tether_protocol::{
-    CAP_CAN_CONTROL, CAP_CAN_HOST, AuthResult, ClipboardData, Decoded, Displays, FrameData, Hello,
-    Message, PROTOCOL_VERSION, PairResult, Role,
-};
 use tracing::{debug, info, warn};
 
 use crate::auth::{PairOutcome, PairingAuth};
@@ -62,7 +62,13 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
     let mut displays = state.displays.clone();
     let current_displays = displays.borrow_and_update().clone();
     if !current_displays.is_empty() {
-        send(&mut ws, &Message::Displays(Displays { displays: current_displays })).await?;
+        send(
+            &mut ws,
+            &Message::Displays(Displays {
+                displays: current_displays,
+            }),
+        )
+        .await?;
     }
 
     loop {
@@ -125,18 +131,30 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
 
 async fn handle_incoming(bytes: &[u8], state: &ServerState) {
     match Message::decode(bytes) {
-        Ok(Decoded::Message { message: Message::InputEvent(ev), .. }) => {
+        Ok(Decoded::Message {
+            message: Message::InputEvent(ev),
+            ..
+        }) => {
             debug!(?ev, "input event");
             // If the injector is gone the daemon is shutting down; drop silently.
             let _ = state.input_tx.send(InjectCommand::Event(ev)).await;
         }
-        Ok(Decoded::Message { message: Message::TextInput(t), .. }) => {
+        Ok(Decoded::Message {
+            message: Message::TextInput(t),
+            ..
+        }) => {
             let _ = state.input_tx.send(InjectCommand::Text(t.text)).await;
         }
-        Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
+        Ok(Decoded::Message {
+            message: Message::ClipboardData(c),
+            ..
+        }) => {
             let _ = state.clipboard_in.send(c.text);
         }
-        Ok(Decoded::Message { message: Message::SelectDisplay(s), .. }) => {
+        Ok(Decoded::Message {
+            message: Message::SelectDisplay(s),
+            ..
+        }) => {
             let _ = state.select_display.send(s.id);
         }
         Ok(Decoded::Unknown { msg_type, .. }) => {
@@ -156,7 +174,10 @@ pub fn validate_controller_hello(hello: &Hello) -> Result<(), String> {
         ));
     }
     if hello.role != Role::Controller {
-        return Err(format!("peer Hello has role {:?}, expected Controller", hello.role));
+        return Err(format!(
+            "peer Hello has role {:?}, expected Controller",
+            hello.role
+        ));
     }
     if hello.capabilities & CAP_CAN_CONTROL == 0 {
         return Err("peer lacks can_control capability".into());
@@ -207,10 +228,16 @@ pub fn handle_auth_message(
         Message::Auth(a) => {
             let ok = !gate_active || auth.verify_token(&a.device_id, &a.token);
             if ok {
-                (Some(Message::AuthResult(AuthResult { ok: true })), AuthDecision::Proceed)
+                (
+                    Some(Message::AuthResult(AuthResult { ok: true })),
+                    AuthDecision::Proceed,
+                )
             } else {
                 // token no good; let the controller attempt pairing next
-                (Some(Message::AuthResult(AuthResult { ok: false })), AuthDecision::Continue)
+                (
+                    Some(Message::AuthResult(AuthResult { ok: false })),
+                    AuthDecision::Continue,
+                )
             }
         }
         Message::PairRequest(p) => {
@@ -220,13 +247,19 @@ pub fn handle_auth_message(
                     AuthDecision::Proceed,
                 ),
                 Ok(_) => (
-                    Some(Message::PairResult(PairResult { ok: false, token: String::new() })),
+                    Some(Message::PairResult(PairResult {
+                        ok: false,
+                        token: String::new(),
+                    })),
                     AuthDecision::Reject,
                 ),
                 Err(e) => {
                     warn!(error = %e, "pairing verification error");
                     (
-                        Some(Message::PairResult(PairResult { ok: false, token: String::new() })),
+                        Some(Message::PairResult(PairResult {
+                            ok: false,
+                            token: String::new(),
+                        })),
                         AuthDecision::Reject,
                     )
                 }
@@ -265,7 +298,13 @@ async fn auth_gate(ws: &mut Ws, state: &ServerState) -> anyhow::Result<()> {
             .context("auth timed out")??;
         let (response, decision) = {
             let mut auth = state.auth.lock().await;
-            handle_auth_message(&mut auth, state.auth_policy, &msg, &binding, crate::auth::now_unix())
+            handle_auth_message(
+                &mut auth,
+                state.auth_policy,
+                &msg,
+                &binding,
+                crate::auth::now_unix(),
+            )
         };
         if let Some(resp) = response {
             send(ws, &resp).await?;
@@ -298,7 +337,10 @@ async fn read_hello(ws: &mut Ws) -> anyhow::Result<Hello> {
         match ws.next().await {
             None => bail!("peer closed before Hello"),
             Some(Ok(WsMessage::Binary(bytes))) => match Message::decode(&bytes)? {
-                Decoded::Message { message: Message::Hello(h), .. } => return Ok(h),
+                Decoded::Message {
+                    message: Message::Hello(h),
+                    ..
+                } => return Ok(h),
                 other => bail!("expected Hello, got {other:?}"),
             },
             Some(Ok(WsMessage::Close(_))) => bail!("peer closed before Hello"),

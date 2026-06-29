@@ -1,5 +1,7 @@
 # Tether
 
+[![CI](https://github.com/allandng/tether/actions/workflows/ci.yml/badge.svg)](https://github.com/allandng/tether/actions/workflows/ci.yml)
+
 Self-hosted remote desktop control: view and control a macOS host from a
 browser-based controller — over the LAN directly, or across networks via
 WebRTC with a tiny self-hosted signaling server. No accounts, no cloud relay

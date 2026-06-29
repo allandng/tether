@@ -10,13 +10,6 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use tether_protocol::{
     Auth, AuthResult, CAP_CAN_CONTROL, ClipboardData, Codec, Decoded, Hello, InputEvent, Message,
     PROTOCOL_VERSION, Resolution, Role, TextInput,
@@ -27,6 +20,13 @@ use tetherd::encode::JpegEncoder;
 use tetherd::input::InjectCommand;
 use tetherd::server::ServerState;
 use tetherd::webrtc::{FrameReassembler, RtcConfig, run_host};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use webrtc::api::APIBuilder;
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const SECRET: &str = "e2e-secret";
 
@@ -36,7 +36,10 @@ struct SyntheticCapturer {
 
 impl ScreenCapturer for SyntheticCapturer {
     fn resolution(&self) -> Resolution {
-        Resolution { width: 640, height: 400 }
+        Resolution {
+            width: 640,
+            height: 400,
+        }
     }
     fn next_frame(&mut self) -> anyhow::Result<RawFrame> {
         std::thread::sleep(Duration::from_millis(33));
@@ -96,7 +99,10 @@ async fn webrtc_end_to_end_frames_and_input() {
             .expect("auth"),
         )),
         // gate off: this test exercises the data-channel transport, not pairing
-        auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
+        auth_policy: tetherd::server::AuthPolicy {
+            require_pairing: false,
+            allow_unpaired: true,
+        },
         bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         bitrate_ceiling_kbps: 4000,
         controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
@@ -118,10 +124,18 @@ async fn webrtc_end_to_end_frames_and_input() {
     // --- controller side, shaped exactly like the browser's
     let api = APIBuilder::new().build();
     let pc = Arc::new(
-        api.new_peer_connection(RTCConfiguration::default()).await.unwrap(),
+        api.new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap(),
     );
     let ctl = pc
-        .create_data_channel("tether-ctl", Some(RTCDataChannelInit { ordered: Some(true), ..Default::default() }))
+        .create_data_channel(
+            "tether-ctl",
+            Some(RTCDataChannelInit {
+                ordered: Some(true),
+                ..Default::default()
+            }),
+        )
         .await
         .unwrap();
     let media = pc
@@ -151,7 +165,13 @@ async fn webrtc_end_to_end_frames_and_input() {
         })
     }));
     let bulk = pc
-        .create_data_channel("tether-bulk", Some(RTCDataChannelInit { ordered: Some(true), ..Default::default() }))
+        .create_data_channel(
+            "tether-bulk",
+            Some(RTCDataChannelInit {
+                ordered: Some(true),
+                ..Default::default()
+            }),
+        )
         .await
         .unwrap();
     let (bulk_tx, mut bulk_rx) = mpsc::unbounded_channel::<Bytes>();
@@ -211,7 +231,10 @@ async fn webrtc_end_to_end_frames_and_input() {
         .send(ClientMessage::Register {
             device_id: "ipad".into(),
             name: "ipad".into(),
-            caps: Caps { can_host: false, can_control: true },
+            caps: Caps {
+                can_host: false,
+                can_control: true,
+            },
             auth: SECRET.into(),
         })
         .unwrap();
@@ -219,7 +242,10 @@ async fn webrtc_end_to_end_frames_and_input() {
     let offer = pc.create_offer(None).await.unwrap();
     pc.set_local_description(offer.clone()).await.unwrap();
     sig_tx
-        .send(ClientMessage::Offer { target: "mac".into(), sdp: offer.sdp })
+        .send(ClientMessage::Offer {
+            target: "mac".into(),
+            sdp: offer.sdp,
+        })
         .unwrap();
 
     // pump signaling until the answer + candidates are in
@@ -248,7 +274,11 @@ async fn webrtc_end_to_end_frames_and_input() {
         .await
         .expect("timed out waiting for host hello")
         .expect("ctl closed");
-    let Ok(Decoded::Message { message: Message::Hello(h), .. }) = Message::decode(&first) else {
+    let Ok(Decoded::Message {
+        message: Message::Hello(h),
+        ..
+    }) = Message::decode(&first)
+    else {
         panic!("expected host Hello");
     };
     assert_eq!(h.role, Role::Host);
@@ -262,21 +292,45 @@ async fn webrtc_end_to_end_frames_and_input() {
     );
 
     // auth gate is off (allow_unpaired); send Auth and expect AuthResult{ok}
-    ctl.send(&Message::Auth(Auth { device_id: "ipad".into(), token: String::new() }).encode())
+    ctl.send(
+        &Message::Auth(Auth {
+            device_id: "ipad".into(),
+            token: String::new(),
+        })
+        .encode(),
+    )
+    .await
+    .unwrap();
+    let ar = tokio::time::timeout(deadline, ctl_rx.recv())
         .await
+        .unwrap()
         .unwrap();
-    let ar = tokio::time::timeout(deadline, ctl_rx.recv()).await.unwrap().unwrap();
     assert!(matches!(
         Message::decode(&ar),
-        Ok(Decoded::Message { message: Message::AuthResult(AuthResult { ok: true }), .. })
+        Ok(Decoded::Message {
+            message: Message::AuthResult(AuthResult { ok: true }),
+            ..
+        })
     ));
 
-    let second = tokio::time::timeout(deadline, ctl_rx.recv()).await.unwrap().unwrap();
-    let Ok(Decoded::Message { message: Message::Resolution(r), .. }) = Message::decode(&second)
+    let second = tokio::time::timeout(deadline, ctl_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let Ok(Decoded::Message {
+        message: Message::Resolution(r),
+        ..
+    }) = Message::decode(&second)
     else {
         panic!("expected Resolution");
     };
-    assert_eq!(r, Resolution { width: 640, height: 400 });
+    assert_eq!(
+        r,
+        Resolution {
+            width: 640,
+            height: 400
+        }
+    );
 
     // --- frames over media: reassemble chunks into a decodable FrameData
     let mut reassembler = FrameReassembler::default();
@@ -288,8 +342,10 @@ async fn webrtc_end_to_end_frames_and_input() {
             .expect("timed out waiting for media chunks")
             .expect("media closed");
         if let Some(wire) = reassembler.on_chunk(&chunk) {
-            let Ok(Decoded::Message { message: Message::FrameData(f), .. }) =
-                Message::decode(&wire)
+            let Ok(Decoded::Message {
+                message: Message::FrameData(f),
+                ..
+            }) = Message::decode(&wire)
             else {
                 panic!("reassembled wire was not FrameData");
             };
@@ -303,8 +359,13 @@ async fn webrtc_end_to_end_frames_and_input() {
     assert_eq!((header.width, header.height), (640, 400));
 
     // --- input path: controller -> ctl channel -> injector queue
-    let ev = InputEvent::KeyDown { code: "KeyZ".into(), modifiers: 0 };
-    ctl.send(&Message::InputEvent(ev.clone()).encode()).await.unwrap();
+    let ev = InputEvent::KeyDown {
+        code: "KeyZ".into(),
+        modifiers: 0,
+    };
+    ctl.send(&Message::InputEvent(ev.clone()).encode())
+        .await
+        .unwrap();
     let received = tokio::time::timeout(deadline, input_rx.recv())
         .await
         .expect("timed out waiting for input event")
@@ -312,9 +373,14 @@ async fn webrtc_end_to_end_frames_and_input() {
     assert!(matches!(received, InjectCommand::Event(e) if e == ev));
 
     // --- soft-keyboard text path: controller -> ctl channel -> injector queue
-    ctl.send(&Message::TextInput(TextInput { text: "señor 🎯".into() }).encode())
-        .await
-        .unwrap();
+    ctl.send(
+        &Message::TextInput(TextInput {
+            text: "señor 🎯".into(),
+        })
+        .encode(),
+    )
+    .await
+    .unwrap();
     let text_cmd = tokio::time::timeout(deadline, input_rx.recv())
         .await
         .expect("timed out waiting for text input")
@@ -327,16 +393,18 @@ async fn webrtc_end_to_end_frames_and_input() {
     // and our first send; give its handler registration a moment.)
     tokio::time::sleep(Duration::from_millis(500)).await;
     let big_up = "u".repeat(100_000);
-    let wire = Message::ClipboardData(ClipboardData { text: big_up.clone() }).encode();
+    let wire = Message::ClipboardData(ClipboardData {
+        text: big_up.clone(),
+    })
+    .encode();
     for chunk in tetherd::webrtc::chunk_frame(1, &wire) {
         bulk.send(&chunk).await.unwrap();
     }
-    let clip = tokio::task::spawn_blocking(move || {
-        clipboard_in_rx.recv_timeout(Duration::from_secs(5))
-    })
-    .await
-    .unwrap()
-    .expect("clipboard not relayed to host");
+    let clip =
+        tokio::task::spawn_blocking(move || clipboard_in_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("clipboard not relayed to host");
     assert_eq!(clip, big_up);
 
     let big_down = "d".repeat(100_000);
@@ -345,9 +413,13 @@ async fn webrtc_end_to_end_frames_and_input() {
     let got = tokio::time::timeout(deadline, async {
         loop {
             let bytes = bulk_rx.recv().await.expect("bulk closed");
-            let Some(wire) = bulk_reassembler.on_chunk(&bytes) else { continue };
-            if let Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) =
-                Message::decode(&wire)
+            let Some(wire) = bulk_reassembler.on_chunk(&bytes) else {
+                continue;
+            };
+            if let Ok(Decoded::Message {
+                message: Message::ClipboardData(c),
+                ..
+            }) = Message::decode(&wire)
             {
                 return c.text;
             }

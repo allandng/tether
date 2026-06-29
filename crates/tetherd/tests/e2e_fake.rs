@@ -6,8 +6,6 @@
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
     Auth, CAP_CAN_CONTROL, Codec, Decoded, Hello, Message, PROTOCOL_VERSION, Resolution, Role,
 };
@@ -15,6 +13,8 @@ use tetherd::capture::{RawFrame, ScreenCapturer};
 use tetherd::encode::JpegEncoder;
 use tetherd::pipeline;
 use tetherd::server::{Server, ServerState};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Paces itself to ~30 fps and draws a moving gradient so successive frames
 /// differ (as real capture does).
@@ -26,7 +26,10 @@ struct SyntheticCapturer {
 
 impl ScreenCapturer for SyntheticCapturer {
     fn resolution(&self) -> Resolution {
-        Resolution { width: self.width, height: self.height }
+        Resolution {
+            width: self.width,
+            height: self.height,
+        }
     }
 
     fn next_frame(&mut self) -> anyhow::Result<RawFrame> {
@@ -56,7 +59,13 @@ impl ScreenCapturer for SyntheticCapturer {
 #[tokio::test]
 async fn full_pipeline_sustains_gate_framerate() {
     let pipeline = pipeline::start(
-        || Ok(SyntheticCapturer { width: 640, height: 400, tick: 0 }),
+        || {
+            Ok(SyntheticCapturer {
+                width: 640,
+                height: 400,
+                tick: 0,
+            })
+        },
         || JpegEncoder::new(75),
     )
     .expect("pipeline start");
@@ -76,14 +85,16 @@ async fn full_pipeline_sustains_gate_framerate() {
             clipboard_out: clipboard_out_rx,
             clipboard_in: clipboard_in_tx,
             auth: std::sync::Arc::new(tokio::sync::Mutex::new(
-                tetherd::auth::PairingAuth::load_or_create(&std::env::temp_dir().join(format!(
-                    "tether-e2e-auth-{}",
-                    std::process::id()
-                )))
+                tetherd::auth::PairingAuth::load_or_create(
+                    &std::env::temp_dir().join(format!("tether-e2e-auth-{}", std::process::id())),
+                )
                 .expect("auth"),
             )),
             // gate off: this test exercises the streaming pipeline, not pairing
-            auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
+            auth_policy: tetherd::server::AuthPolicy {
+                require_pairing: false,
+                allow_unpaired: true,
+            },
             bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bitrate_ceiling_kbps: 4000,
             controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
@@ -113,7 +124,11 @@ async fn full_pipeline_sustains_gate_framerate() {
     .unwrap();
     // auth gate is off (allow_unpaired) but the controller still sends Auth
     ws.send(WsMessage::Binary(
-        Message::Auth(Auth { device_id: "e2e".into(), token: String::new() }).encode(),
+        Message::Auth(Auth {
+            device_id: "e2e".into(),
+            token: String::new(),
+        })
+        .encode(),
     ))
     .await
     .unwrap();
@@ -130,17 +145,34 @@ async fn full_pipeline_sustains_gate_framerate() {
             .expect("host stalled")
             .expect("stream ended")
             .expect("ws error");
-        let WsMessage::Binary(bytes) = msg else { continue };
+        let WsMessage::Binary(bytes) = msg else {
+            continue;
+        };
         match Message::decode(&bytes).expect("decode") {
-            Decoded::Message { message: Message::FrameData(f), .. } => {
+            Decoded::Message {
+                message: Message::FrameData(f),
+                ..
+            } => {
                 assert_eq!(f.codec, Codec::Jpeg);
                 frames += 1;
                 first_payload.get_or_insert(f.payload);
             }
-            Decoded::Message { message: Message::Resolution(r), .. } => resolution = Some(r),
-            Decoded::Message { message: Message::Hello(_), .. } => {}
-            Decoded::Message { message: Message::AuthResult(_), .. } => {}
-            Decoded::Message { message: Message::Displays(_), .. } => {}
+            Decoded::Message {
+                message: Message::Resolution(r),
+                ..
+            } => resolution = Some(r),
+            Decoded::Message {
+                message: Message::Hello(_),
+                ..
+            } => {}
+            Decoded::Message {
+                message: Message::AuthResult(_),
+                ..
+            } => {}
+            Decoded::Message {
+                message: Message::Displays(_),
+                ..
+            } => {}
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -148,7 +180,10 @@ async fn full_pipeline_sustains_gate_framerate() {
 
     assert_eq!(
         resolution,
-        Some(Resolution { width: 640, height: 400 }),
+        Some(Resolution {
+            width: 640,
+            height: 400
+        }),
         "resolution must be announced"
     );
 

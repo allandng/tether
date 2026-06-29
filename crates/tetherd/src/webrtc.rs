@@ -18,8 +18,13 @@ use std::time::Duration;
 use anyhow::Context;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use tether_protocol::{ClipboardData, Decoded, Displays, FrameData, Message, Resolution};
+use tether_signal::protocol::{
+    Caps, ClientMessage, ErrorCode, IceServer as ServerIceServer, ServerMessage,
+};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tracing::{debug, info, warn};
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -27,11 +32,6 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use tether_protocol::{ClipboardData, Decoded, Displays, FrameData, Message, Resolution};
-use tether_signal::protocol::{
-    Caps, ClientMessage, ErrorCode, IceServer as ServerIceServer, ServerMessage,
-};
-use tracing::{debug, info, warn};
 
 use crate::input::InjectCommand;
 use crate::server::ServerState;
@@ -51,7 +51,8 @@ pub fn chunk_frame(frame_seq: u32, wire: &[u8]) -> Vec<Bytes> {
     let count = wire.len().div_ceil(CHUNK_PAYLOAD).max(1);
     let mut chunks = Vec::with_capacity(count);
     for idx in 0..count {
-        let slice = &wire[idx * CHUNK_PAYLOAD..(idx * CHUNK_PAYLOAD + CHUNK_PAYLOAD).min(wire.len())];
+        let slice =
+            &wire[idx * CHUNK_PAYLOAD..(idx * CHUNK_PAYLOAD + CHUNK_PAYLOAD).min(wire.len())];
         let mut chunk = Vec::with_capacity(CHUNK_HEADER + slice.len());
         chunk.extend_from_slice(&frame_seq.to_le_bytes());
         chunk.extend_from_slice(&(idx as u16).to_le_bytes());
@@ -64,17 +65,12 @@ pub fn chunk_frame(frame_seq: u32, wire: &[u8]) -> Vec<Bytes> {
 
 /// Latest-wins reassembler (the host only sends in Phase 2; this lives here
 /// for symmetry, the e2e test, and the future host-receives path).
+#[derive(Default)]
 pub struct FrameReassembler {
     seq: Option<u32>,
     count: usize,
     received: usize,
     parts: Vec<Option<Bytes>>,
-}
-
-impl Default for FrameReassembler {
-    fn default() -> Self {
-        FrameReassembler { seq: None, count: 0, received: 0, parts: Vec::new() }
-    }
 }
 
 impl FrameReassembler {
@@ -89,10 +85,10 @@ impl FrameReassembler {
             return None;
         }
         if self.seq != Some(seq) {
-            if let Some(current) = self.seq {
-                if seq_older(seq, current) {
-                    return None;
-                }
+            if let Some(current) = self.seq
+                && seq_older(seq, current)
+            {
+                return None;
             }
             self.seq = Some(seq);
             self.count = count;
@@ -107,7 +103,8 @@ impl FrameReassembler {
         if self.received < self.count {
             return None;
         }
-        let mut wire = Vec::with_capacity(self.parts.iter().map(|p| p.as_ref().unwrap().len()).sum());
+        let mut wire =
+            Vec::with_capacity(self.parts.iter().map(|p| p.as_ref().unwrap().len()).sum());
         for part in self.parts.drain(..) {
             wire.extend_from_slice(&part.unwrap());
         }
@@ -163,7 +160,6 @@ struct ActivePeer {
     shutdown_tx: watch::Sender<bool>,
 }
 
-
 async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(&config.signal_url)
         .await
@@ -174,7 +170,9 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
     let (signal_tx, mut signal_rx) = mpsc::unbounded_channel::<ClientMessage>();
     let writer = tokio::spawn(async move {
         while let Some(msg) = signal_rx.recv().await {
-            let Ok(json) = serde_json::to_string(&msg) else { continue };
+            let Ok(json) = serde_json::to_string(&msg) else {
+                continue;
+            };
             if ws_sink.send(WsMessage::Text(json.into())).await.is_err() {
                 break;
             }
@@ -184,15 +182,17 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
     signal_tx.send(ClientMessage::Register {
         device_id: config.device_id.clone(),
         name: config.device_name.clone(),
-        caps: Caps { can_host: true, can_control: true },
+        caps: Caps {
+            can_host: true,
+            can_control: true,
+        },
         auth: config.secret.clone(),
     })?;
 
     let active: Arc<Mutex<Option<ActivePeer>>> = Arc::new(Mutex::new(None));
     // ICE servers (STUN + ephemeral TURN) supplied by the signal server on
     // Registered; defaults to the local STUN config until then.
-    let ice_servers: Arc<Mutex<Vec<RTCIceServer>>> =
-        Arc::new(Mutex::new(to_rtc_ice(&[], config)));
+    let ice_servers: Arc<Mutex<Vec<RTCIceServer>>> = Arc::new(Mutex::new(to_rtc_ice(&[], config)));
 
     let result = async {
         while let Some(msg) = ws_stream.next().await {
@@ -211,7 +211,9 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
                 }
             };
             match parsed {
-                ServerMessage::Registered { ice_servers: servers } => {
+                ServerMessage::Registered {
+                    ice_servers: servers,
+                } => {
                     info!(
                         device_id = %config.device_id,
                         ice = servers.len(),
@@ -229,8 +231,15 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
                         let _ = old.shutdown_tx.send(true); // free its permit promptly
                     }
                     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-                    match answer_offer(state, &signal_tx, from.clone(), sdp, ice, shutdown_rx).await {
-                        Ok(pc) => *slot = Some(ActivePeer { controller_id: from, pc, shutdown_tx }),
+                    match answer_offer(state, &signal_tx, from.clone(), sdp, ice, shutdown_rx).await
+                    {
+                        Ok(pc) => {
+                            *slot = Some(ActivePeer {
+                                controller_id: from,
+                                pc,
+                                shutdown_tx,
+                            })
+                        }
                         Err(e) => warn!(error = %e, "failed to answer offer"),
                     }
                 }
@@ -275,7 +284,10 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
 /// to the host's local STUN config when the server advertised none.
 fn to_rtc_ice(servers: &[ServerIceServer], config: &RtcConfig) -> Vec<RTCIceServer> {
     if servers.is_empty() {
-        return vec![RTCIceServer { urls: config.stun.clone(), ..Default::default() }];
+        return vec![RTCIceServer {
+            urls: config.stun.clone(),
+            ..Default::default()
+        }];
     }
     servers
         .iter()
@@ -283,7 +295,6 @@ fn to_rtc_ice(servers: &[ServerIceServer], config: &RtcConfig) -> Vec<RTCIceServ
             urls: s.urls.clone(),
             username: s.username.clone().unwrap_or_default(),
             credential: s.credential.clone().unwrap_or_default(),
-            ..Default::default()
         })
         .collect()
 }
@@ -313,15 +324,14 @@ async fn answer_offer(
             let signal_tx = signal_tx.clone();
             let target = target.clone();
             Box::pin(async move {
-                if let Some(c) = candidate {
-                    if let Ok(init) = c.to_json() {
-                        if let Ok(json) = serde_json::to_string(&init) {
-                            let _ = signal_tx.send(ClientMessage::Ice {
-                                target,
-                                candidate: json,
-                            });
-                        }
-                    }
+                if let Some(c) = candidate
+                    && let Ok(init) = c.to_json()
+                    && let Ok(json) = serde_json::to_string(&init)
+                {
+                    let _ = signal_tx.send(ClientMessage::Ice {
+                        target,
+                        candidate: json,
+                    });
                 }
             })
         }));
@@ -360,10 +370,14 @@ async fn answer_offer(
         }));
     }
 
-    pc.set_remote_description(RTCSessionDescription::offer(offer_sdp)?).await?;
+    pc.set_remote_description(RTCSessionDescription::offer(offer_sdp)?)
+        .await?;
     let answer = pc.create_answer(None).await?;
     pc.set_local_description(answer.clone()).await?;
-    signal_tx.send(ClientMessage::Answer { target: from, sdp: answer.sdp })?;
+    signal_tx.send(ClientMessage::Answer {
+        target: from,
+        sdp: answer.sdp,
+    })?;
     Ok(pc)
 }
 
@@ -372,8 +386,14 @@ async fn answer_offer(
 /// ends compute the same value; a relay that swaps fingerprints to MITM yields
 /// different values on each side, so the channel-bound pairing proof fails.
 async fn dtls_channel_binding(pc: &RTCPeerConnection) -> [u8; 32] {
-    let local = pc.local_description().await.and_then(|d| sdp_fingerprint(&d.sdp));
-    let remote = pc.remote_description().await.and_then(|d| sdp_fingerprint(&d.sdp));
+    let local = pc
+        .local_description()
+        .await
+        .and_then(|d| sdp_fingerprint(&d.sdp));
+    let remote = pc
+        .remote_description()
+        .await
+        .and_then(|d| sdp_fingerprint(&d.sdp));
     match (local, remote) {
         (Some(l), Some(r)) => crate::auth::channel_binding(&l, &r),
         // If a fingerprint is somehow missing, fall back to a fixed binding;
@@ -400,7 +420,9 @@ async fn run_auth_gate(
     binding: &[u8; 32],
 ) -> bool {
     loop {
-        let Some(bytes) = in_rx.recv().await else { return false };
+        let Some(bytes) = in_rx.recv().await else {
+            return false;
+        };
         let msg = match Message::decode(&bytes) {
             Ok(Decoded::Message { message, .. }) => message,
             _ => continue,
@@ -415,10 +437,10 @@ async fn run_auth_gate(
                 crate::auth::now_unix(),
             )
         };
-        if let Some(resp) = response {
-            if dc.send(&resp.encode()).await.is_err() {
-                return false;
-            }
+        if let Some(resp) = response
+            && dc.send(&resp.encode()).await.is_err()
+        {
+            return false;
         }
         match decision {
             crate::session::AuthDecision::Proceed => return true,
@@ -452,9 +474,14 @@ fn wire_ctl_channel(
         // Handshake: the controller speaks first, and only after the channel
         // opens, so replies are safe to send from here on. Any early return
         // drops authed_tx, signalling the media/bulk pumps to bail.
-        let Some(first) = in_rx.recv().await else { return };
+        let Some(first) = in_rx.recv().await else {
+            return;
+        };
         let hello = match Message::decode(&first) {
-            Ok(Decoded::Message { message: Message::Hello(h), .. }) => h,
+            Ok(Decoded::Message {
+                message: Message::Hello(h),
+                ..
+            }) => h,
             other => {
                 warn!(?other, "expected Hello on ctl channel");
                 let _ = pc.close().await;
@@ -501,13 +528,19 @@ fn wire_ctl_channel(
 
         let mut resolution = state.resolution.clone();
         let current: Resolution = *resolution.borrow_and_update();
-        if dc.send(&Message::Resolution(current).encode()).await.is_err() {
+        if dc
+            .send(&Message::Resolution(current).encode())
+            .await
+            .is_err()
+        {
             return;
         }
         let mut displays = state.displays.clone();
         let current_displays = displays.borrow_and_update().clone();
         if !current_displays.is_empty() {
-            let msg = Message::Displays(Displays { displays: current_displays });
+            let msg = Message::Displays(Displays {
+                displays: current_displays,
+            });
             if dc.send(&msg.encode()).await.is_err() {
                 return;
             }
@@ -593,7 +626,10 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch:
                     return;
                 };
                 match Message::decode(&wire) {
-                    Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
+                    Ok(Decoded::Message {
+                        message: Message::ClipboardData(c),
+                        ..
+                    }) => {
                         let _ = state.clipboard_in.send(c.text);
                     }
                     other => debug!(?other, "ignoring non-clipboard bulk message"),
@@ -689,8 +725,9 @@ fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch
         let mut controller =
             crate::adaptive::BitrateController::new(state.bitrate_ceiling_kbps, BITRATE_FLOOR_KBPS);
         tokio::spawn(async move {
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(crate::adaptive::SAMPLE_INTERVAL_MS));
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+                crate::adaptive::SAMPLE_INTERVAL_MS,
+            ));
             loop {
                 tick.tick().await;
                 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
@@ -713,7 +750,9 @@ fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch
         let mut frames = state.frames.clone();
         frames.mark_changed(); // a mid-stream joiner gets the current frame
         while frames.changed().await.is_ok() {
-            let Some(frame) = frames.borrow_and_update().clone() else { continue };
+            let Some(frame) = frames.borrow_and_update().clone() else {
+                continue;
+            };
             if dc.buffered_amount().await > MAX_BUFFERED {
                 debug!("media channel backed up, dropping frame");
                 continue;
@@ -750,7 +789,9 @@ mod tests {
 
     #[test]
     fn chunk_and_reassemble_round_trip() {
-        let wire: Vec<u8> = (0..(CHUNK_PAYLOAD * 2 + 500)).map(|i| (i % 251) as u8).collect();
+        let wire: Vec<u8> = (0..(CHUNK_PAYLOAD * 2 + 500))
+            .map(|i| (i % 251) as u8)
+            .collect();
         let chunks = chunk_frame(7, &wire);
         assert_eq!(chunks.len(), 3);
         let mut r = FrameReassembler::default();
@@ -765,7 +806,13 @@ mod tests {
         let new_wire = vec![9u8; 100];
         let mut r = FrameReassembler::default();
         assert!(r.on_chunk(&old[0]).is_none());
-        assert_eq!(r.on_chunk(&chunk_frame(2, &new_wire)[0]).unwrap(), Bytes::from(new_wire));
-        assert!(r.on_chunk(&old[1]).is_none(), "straggler must not resurrect old frame");
+        assert_eq!(
+            r.on_chunk(&chunk_frame(2, &new_wire)[0]).unwrap(),
+            Bytes::from(new_wire)
+        );
+        assert!(
+            r.on_chunk(&old[1]).is_none(),
+            "straggler must not resurrect old frame"
+        );
     }
 }

@@ -146,14 +146,34 @@ pub struct FrameData {
 /// capture area. The host maps them onto its own coordinate space.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
-    MouseMove { x: u16, y: u16 },
-    MouseDown { button: MouseButton, x: u16, y: u16 },
-    MouseUp { button: MouseButton, x: u16, y: u16 },
+    MouseMove {
+        x: u16,
+        y: u16,
+    },
+    MouseDown {
+        button: MouseButton,
+        x: u16,
+        y: u16,
+    },
+    MouseUp {
+        button: MouseButton,
+        x: u16,
+        y: u16,
+    },
     /// Scroll deltas in pixels (DOM `WheelEvent` deltaMode 0), positive = down/right.
-    Scroll { dx: i16, dy: i16 },
+    Scroll {
+        dx: i16,
+        dy: i16,
+    },
     /// `code` is the W3C `KeyboardEvent.code` string (physical key, layout-independent).
-    KeyDown { code: String, modifiers: u8 },
-    KeyUp { code: String, modifiers: u8 },
+    KeyDown {
+        code: String,
+        modifiers: u8,
+    },
+    KeyUp {
+        code: String,
+        modifiers: u8,
+    },
 }
 
 mod input_kind {
@@ -398,7 +418,9 @@ impl Message {
             msg_type::RESOLUTION => Message::Resolution(decode_resolution(payload, msg_type)?),
             msg_type::FRAME_DATA => Message::FrameData(decode_frame_data(payload, msg_type)?),
             msg_type::INPUT_EVENT => Message::InputEvent(decode_input_event(payload, msg_type)?),
-            msg_type::CLIPBOARD_DATA => Message::ClipboardData(decode_clipboard(payload, msg_type)?),
+            msg_type::CLIPBOARD_DATA => {
+                Message::ClipboardData(decode_clipboard(payload, msg_type)?)
+            }
             msg_type::TEXT_INPUT => Message::TextInput(decode_text_input(payload)?),
             msg_type::PAIR_REQUEST => Message::PairRequest(decode_pair_request(payload, msg_type)?),
             msg_type::PAIR_RESULT => Message::PairResult(decode_pair_result(payload, msg_type)?),
@@ -408,7 +430,12 @@ impl Message {
             msg_type::SELECT_DISPLAY => {
                 Message::SelectDisplay(decode_select_display(payload, msg_type)?)
             }
-            other => return Ok(Decoded::Unknown { msg_type: other, consumed }),
+            other => {
+                return Ok(Decoded::Unknown {
+                    msg_type: other,
+                    consumed,
+                });
+            }
         };
         Ok(Decoded::Message { message, consumed })
     }
@@ -453,7 +480,11 @@ fn decode_pair_request(p: &[u8], t: u8) -> Result<PairRequest, DecodeError> {
     if !p.is_empty() {
         return Err(DecodeError::BadLength(t));
     }
-    Ok(PairRequest { device_id, name, proof })
+    Ok(PairRequest {
+        device_id,
+        name,
+        proof,
+    })
 }
 
 fn decode_pair_result(p: &[u8], t: u8) -> Result<PairResult, DecodeError> {
@@ -506,7 +537,13 @@ fn decode_displays(p: &[u8], t: u8) -> Result<Displays, DecodeError> {
         let active = rest[12] != 0;
         rest = &rest[13..];
         let name = take_str(&mut rest, t)?;
-        displays.push(DisplayInfo { id, width, height, active, name });
+        displays.push(DisplayInfo {
+            id,
+            width,
+            height,
+            active,
+            name,
+        });
     }
     if !rest.is_empty() {
         return Err(DecodeError::BadLength(t));
@@ -518,7 +555,9 @@ fn decode_select_display(p: &[u8], t: u8) -> Result<SelectDisplay, DecodeError> 
     if p.len() != 4 {
         return Err(DecodeError::BadLength(t));
     }
-    Ok(SelectDisplay { id: u32::from_le_bytes([p[0], p[1], p[2], p[3]]) })
+    Ok(SelectDisplay {
+        id: u32::from_le_bytes([p[0], p[1], p[2], p[3]]),
+    })
 }
 
 fn encode_input_event(buf: &mut BytesMut, ev: &InputEvent) {
@@ -590,9 +629,7 @@ fn decode_frame_data(p: &[u8], t: u8) -> Result<FrameData, DecodeError> {
     Ok(FrameData {
         codec: Codec::from_u8(p[0])?,
         seq: u32::from_le_bytes([p[1], p[2], p[3], p[4]]),
-        timestamp_micros: u64::from_le_bytes([
-            p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12],
-        ]),
+        timestamp_micros: u64::from_le_bytes([p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12]]),
         payload: Bytes::copy_from_slice(&p[13..]),
     })
 }
@@ -719,7 +756,10 @@ mod tests {
                 role: Role::Host,
                 capabilities: CAP_CAN_HOST | CAP_CAN_CONTROL,
             }),
-            Message::Resolution(Resolution { width: 3456, height: 2234 }),
+            Message::Resolution(Resolution {
+                width: 3456,
+                height: 2234,
+            }),
             Message::FrameData(FrameData {
                 codec: Codec::Jpeg,
                 seq: 42,
@@ -748,27 +788,59 @@ mod tests {
                 code: "KeyA".into(),
                 modifiers: modifiers::SHIFT | modifiers::META,
             }),
-            Message::InputEvent(InputEvent::KeyUp { code: "MetaLeft".into(), modifiers: 0 }),
-            Message::ClipboardData(ClipboardData { text: "héllo 📋".into() }),
-            Message::ClipboardData(ClipboardData { text: String::new() }),
+            Message::InputEvent(InputEvent::KeyUp {
+                code: "MetaLeft".into(),
+                modifiers: 0,
+            }),
+            Message::ClipboardData(ClipboardData {
+                text: "héllo 📋".into(),
+            }),
+            Message::ClipboardData(ClipboardData {
+                text: String::new(),
+            }),
             Message::TextInput(TextInput { text: "a".into() }),
-            Message::TextInput(TextInput { text: "señor 🎯".into() }),
-            Message::TextInput(TextInput { text: String::new() }),
+            Message::TextInput(TextInput {
+                text: "señor 🎯".into(),
+            }),
+            Message::TextInput(TextInput {
+                text: String::new(),
+            }),
             Message::PairRequest(PairRequest {
                 device_id: "a1b2c3".into(),
                 name: "iPad".into(),
                 proof: vec![0xDE, 0xAD, 0xBE, 0xEF],
             }),
-            Message::PairResult(PairResult { ok: true, token: "tok123".into() }),
-            Message::PairResult(PairResult { ok: false, token: String::new() }),
-            Message::Auth(Auth { device_id: "a1b2c3".into(), token: "tok123".into() }),
+            Message::PairResult(PairResult {
+                ok: true,
+                token: "tok123".into(),
+            }),
+            Message::PairResult(PairResult {
+                ok: false,
+                token: String::new(),
+            }),
+            Message::Auth(Auth {
+                device_id: "a1b2c3".into(),
+                token: "tok123".into(),
+            }),
             Message::AuthResult(AuthResult { ok: true }),
             Message::AuthResult(AuthResult { ok: false }),
             Message::Displays(Displays { displays: vec![] }),
             Message::Displays(Displays {
                 displays: vec![
-                    DisplayInfo { id: 1, width: 3420, height: 2214, active: true, name: "Built-in".into() },
-                    DisplayInfo { id: 2, width: 2560, height: 1440, active: false, name: "Studio Display".into() },
+                    DisplayInfo {
+                        id: 1,
+                        width: 3420,
+                        height: 2214,
+                        active: true,
+                        name: "Built-in".into(),
+                    },
+                    DisplayInfo {
+                        id: 2,
+                        width: 2560,
+                        height: 1440,
+                        active: false,
+                        name: "Studio Display".into(),
+                    },
                 ],
             }),
             Message::SelectDisplay(SelectDisplay { id: 2 }),
@@ -802,7 +874,11 @@ mod tests {
         wire.put_u8(0x7F); // unknown type
         wire.put_slice(&[1, 2]);
         // a real message follows in the same buffer
-        let follow = Message::Resolution(Resolution { width: 1, height: 2 }).encode();
+        let follow = Message::Resolution(Resolution {
+            width: 1,
+            height: 2,
+        })
+        .encode();
         wire.put_slice(&follow);
 
         let Decoded::Unknown { msg_type, consumed } = Message::decode(&wire).unwrap() else {
@@ -813,7 +889,13 @@ mod tests {
         let Decoded::Message { message, .. } = Message::decode(&wire[consumed..]).unwrap() else {
             panic!("expected Message after skipping unknown");
         };
-        assert_eq!(message, Message::Resolution(Resolution { width: 1, height: 2 }));
+        assert_eq!(
+            message,
+            Message::Resolution(Resolution {
+                width: 1,
+                height: 2
+            })
+        );
     }
 
     #[test]
@@ -883,7 +965,10 @@ mod tests {
         });
         assert_eq!(&hello.encode()[..], &[5, 0, 0, 0, 0x01, 1, 0, 1, 2]);
 
-        let resolution = Message::Resolution(Resolution { width: 1920, height: 1080 });
+        let resolution = Message::Resolution(Resolution {
+            width: 1920,
+            height: 1080,
+        });
         assert_eq!(
             &resolution.encode()[..],
             &[9, 0, 0, 0, 0x02, 0x80, 0x07, 0, 0, 0x38, 0x04, 0, 0]
@@ -897,7 +982,9 @@ mod tests {
         });
         assert_eq!(
             &frame.encode()[..],
-            &[16, 0, 0, 0, 0x03, 0, 7, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0xAB, 0xCD]
+            &[
+                16, 0, 0, 0, 0x03, 0, 7, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0xAB, 0xCD
+            ]
         );
 
         let key = Message::InputEvent(InputEvent::KeyDown {
@@ -910,16 +997,25 @@ mod tests {
         );
 
         let mouse = Message::InputEvent(InputEvent::MouseMove { x: 0, y: 65535 });
-        assert_eq!(&mouse.encode()[..], &[6, 0, 0, 0, 0x04, 0, 0, 0, 0xFF, 0xFF]);
+        assert_eq!(
+            &mouse.encode()[..],
+            &[6, 0, 0, 0, 0x04, 0, 0, 0, 0xFF, 0xFF]
+        );
 
         let clipboard = Message::ClipboardData(ClipboardData { text: "hi".into() });
-        assert_eq!(&clipboard.encode()[..], &[4, 0, 0, 0, 0x05, 0x00, 0x68, 0x69]);
+        assert_eq!(
+            &clipboard.encode()[..],
+            &[4, 0, 0, 0, 0x05, 0x00, 0x68, 0x69]
+        );
 
         let text = Message::TextInput(TextInput { text: "hi".into() });
         assert_eq!(&text.encode()[..], &[3, 0, 0, 0, 0x06, 0x68, 0x69]);
 
         // Auth { device_id: "hi", token: "ok" }: type + (u16 len + "hi") + (u16 len + "ok")
-        let auth = Message::Auth(Auth { device_id: "hi".into(), token: "ok".into() });
+        let auth = Message::Auth(Auth {
+            device_id: "hi".into(),
+            token: "ok".into(),
+        });
         assert_eq!(
             &auth.encode()[..],
             &[9, 0, 0, 0, 0x09, 2, 0, 0x68, 0x69, 2, 0, 0x6F, 0x6B]
@@ -944,14 +1040,14 @@ mod tests {
         assert_eq!(
             &displays.encode()[..],
             &[
-                18, 0, 0, 0, // total_len
+                18, 0, 0, 0,    // total_len
                 0x0B, // Displays
-                1, // count
+                1,    // count
                 1, 0, 0, 0, // id
                 0x20, 0x03, 0, 0, // 800
                 0x58, 0x02, 0, 0, // 600
                 1, // active
-                1, 0, // name_len = 1
+                1, 0,    // name_len = 1
                 0x58, // "X"
             ]
         );
@@ -1013,21 +1109,40 @@ mod tests {
     #[test]
     fn stream_decoding_two_messages_back_to_back() {
         let a = Message::InputEvent(InputEvent::MouseMove { x: 1, y: 2 }).encode();
-        let b = Message::Resolution(Resolution { width: 800, height: 600 }).encode();
+        let b = Message::Resolution(Resolution {
+            width: 800,
+            height: 600,
+        })
+        .encode();
         let mut stream = BytesMut::new();
         stream.put_slice(&a);
         stream.put_slice(&b);
 
-        let Decoded::Message { message: m1, consumed } = Message::decode(&stream).unwrap() else {
-            panic!()
-        };
-        assert_eq!(m1, Message::InputEvent(InputEvent::MouseMove { x: 1, y: 2 }));
-        let Decoded::Message { message: m2, consumed: c2 } =
-            Message::decode(&stream[consumed..]).unwrap()
+        let Decoded::Message {
+            message: m1,
+            consumed,
+        } = Message::decode(&stream).unwrap()
         else {
             panic!()
         };
-        assert_eq!(m2, Message::Resolution(Resolution { width: 800, height: 600 }));
+        assert_eq!(
+            m1,
+            Message::InputEvent(InputEvent::MouseMove { x: 1, y: 2 })
+        );
+        let Decoded::Message {
+            message: m2,
+            consumed: c2,
+        } = Message::decode(&stream[consumed..]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            m2,
+            Message::Resolution(Resolution {
+                width: 800,
+                height: 600
+            })
+        );
         assert_eq!(consumed + c2, stream.len());
     }
 }

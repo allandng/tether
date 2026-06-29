@@ -27,7 +27,10 @@ pub struct NoDisplays;
 
 impl std::fmt::Display for NoDisplays {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "no displays available to capture (display asleep or screen locked)")
+        write!(
+            f,
+            "no displays available to capture (display asleep or screen locked)"
+        )
     }
 }
 
@@ -126,7 +129,10 @@ impl SckCapturer {
         Ok(SckCapturer {
             stream,
             rx,
-            resolution: Resolution { width: px_w, height: px_h },
+            resolution: Resolution {
+                width: px_w,
+                height: px_h,
+            },
             fps,
             current_id: chosen_id,
         })
@@ -194,7 +200,10 @@ impl ScreenCapturer for SckCapturer {
             .update_configuration(&capture_config(px_w, px_h, self.fps))
             .map_err(|e| anyhow!("update_configuration: {e}"))?;
         self.current_id = id;
-        self.resolution = Resolution { width: px_w, height: px_h };
+        self.resolution = Resolution {
+            width: px_w,
+            height: px_h,
+        };
         Ok(())
     }
 }

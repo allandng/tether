@@ -22,9 +22,7 @@ use objc2_core_media::{
     CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     kCMSampleAttachmentKey_NotSync, kCMVideoCodecType_H264,
 };
-use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferCreateWithBytes, kCVPixelFormatType_32BGRA,
-};
+use objc2_core_video::{CVPixelBuffer, CVPixelBufferCreateWithBytes, kCVPixelFormatType_32BGRA};
 use objc2_video_toolbox::{
     VTCompressionSession, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
     kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -80,7 +78,12 @@ impl VtH264Encoder {
             return Ok(());
         }
         self.session = None; // drop (and invalidate) any previous session first
-        info!(width, height, bitrate_bps = self.bitrate_bps, "creating VT compression session");
+        info!(
+            width,
+            height,
+            bitrate_bps = self.bitrate_bps,
+            "creating VT compression session"
+        );
 
         let mut session_out: *mut VTCompressionSession = ptr::null_mut();
         // SAFETY: all pointer args are valid for the duration of the call;
@@ -106,7 +109,11 @@ impl VtH264Encoder {
         // SAFETY: create-rule — we own one reference to the returned session.
         let session = unsafe { CFRetained::from_raw(NonNull::new_unchecked(session_out)) };
 
-        set_property(&session, unsafe { kVTCompressionPropertyKey_RealTime }, CFBoolean::new(true).as_ref())?;
+        set_property(
+            &session,
+            unsafe { kVTCompressionPropertyKey_RealTime },
+            CFBoolean::new(true).as_ref(),
+        )?;
         set_property(
             &session,
             unsafe { kVTCompressionPropertyKey_AllowFrameReordering },
@@ -304,9 +311,8 @@ unsafe fn annex_b_from_sample(sample: &CMSampleBuffer) -> Result<Vec<u8>, String
                 }
                 let dict = arr.value_at_index(0) as *const objc2_core_foundation::CFDictionary;
                 let dict = dict.as_ref()?;
-                let not_sync = dict.value(
-                    kCMSampleAttachmentKey_NotSync as *const CFString as *const c_void,
-                );
+                let not_sync =
+                    dict.value(kCMSampleAttachmentKey_NotSync as *const CFString as *const c_void);
                 Some(!not_sync.is_null())
             })
             .map(|not_sync| !not_sync)
@@ -353,7 +359,11 @@ unsafe fn annex_b_from_sample(sample: &CMSampleBuffer) -> Result<Vec<u8>, String
     let len = unsafe { block.data_length() };
     let mut avcc = vec![0u8; len];
     let status = unsafe {
-        block.copy_data_bytes(0, len, NonNull::new(avcc.as_mut_ptr() as *mut c_void).unwrap())
+        block.copy_data_bytes(
+            0,
+            len,
+            NonNull::new(avcc.as_mut_ptr() as *mut c_void).unwrap(),
+        )
     };
     if status != 0 {
         return Err(format!("CMBlockBufferCopyDataBytes = {status}"));
@@ -393,7 +403,13 @@ mod tests {
                 bgra[o + 2] = 100;
             }
         }
-        RawFrame { width, height, bytes_per_row, bgra, timestamp_micros: 0 }
+        RawFrame {
+            width,
+            height,
+            bytes_per_row,
+            bgra,
+            timestamp_micros: 0,
+        }
     }
 
     fn nal_types(annex_b: &[u8]) -> Vec<u8> {
@@ -454,7 +470,10 @@ mod tests {
         }
         // 9 delta frames of a slowly-moving gradient at 4 Mbps must come in
         // well under the keyframe-per-frame regime JPEG would produce.
-        assert!(delta_total / 9 < key.len(), "deltas not smaller than keyframe");
+        assert!(
+            delta_total / 9 < key.len(),
+            "deltas not smaller than keyframe"
+        );
     }
 
     #[test]
@@ -465,7 +484,10 @@ mod tests {
         // both must be keyframes with parameter sets (new session each)
         for (label, au) in [("first", &a), ("second", &b)] {
             let types = nal_types(au);
-            assert!(types.contains(&5), "{label} AU lacks IDR after session (re)create");
+            assert!(
+                types.contains(&5),
+                "{label} AU lacks IDR after session (re)create"
+            );
         }
     }
 }

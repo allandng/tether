@@ -36,7 +36,10 @@ impl FrameEncoder for JpegEncoder {
             height: frame.height as usize,
             format: turbojpeg::PixelFormat::BGRA,
         };
-        let buf = self.compressor.compress_to_owned(image).context("jpeg encode")?;
+        let buf = self
+            .compressor
+            .compress_to_owned(image)
+            .context("jpeg encode")?;
         Ok(Bytes::copy_from_slice(&buf))
     }
 }
@@ -58,7 +61,13 @@ mod tests {
                 bgra[o + 3] = 255;
             }
         }
-        RawFrame { width, height, bytes_per_row, bgra, timestamp_micros: 0 }
+        RawFrame {
+            width,
+            height,
+            bytes_per_row,
+            bgra,
+            timestamp_micros: 0,
+        }
     }
 
     #[test]
@@ -76,7 +85,10 @@ mod tests {
         let decoded = turbojpeg::decompress(&jpeg, turbojpeg::PixelFormat::BGRA).unwrap();
         let right = decoded.pixels[(decoded.pitch * 24) + 60 * 4] as i32; // B near right edge
         let left = decoded.pixels[(decoded.pitch * 24) + 2 * 4] as i32; // B near left edge
-        assert!(right - left > 100, "blue gradient lost: left={left} right={right}");
+        assert!(
+            right - left > 100,
+            "blue gradient lost: left={left} right={right}"
+        );
     }
 
     #[test]

@@ -79,7 +79,9 @@ impl Args {
     /// At least one transport, and each transport's flags complete.
     pub fn validate(&self) -> Result<(), String> {
         if self.bind.is_none() && self.signal.is_none() {
-            return Err("nothing to do: pass --bind/--allow (LAN) and/or --signal/--secret (WebRTC)".into());
+            return Err(
+                "nothing to do: pass --bind/--allow (LAN) and/or --signal/--secret (WebRTC)".into(),
+            );
         }
         if self.bind.is_some() && self.allow.is_empty() {
             return Err("--bind requires at least one --allow".into());
@@ -141,15 +143,35 @@ mod tests {
 
     #[test]
     fn bind_validation_accepts_loopback_and_private() {
-        for good in ["127.0.0.1", "10.0.0.5", "172.16.31.2", "192.168.1.50", "169.254.7.7", "::1"] {
-            assert!(validate_bind_addr(ip(good)).is_ok(), "{good} should be bindable");
+        for good in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "172.16.31.2",
+            "192.168.1.50",
+            "169.254.7.7",
+            "::1",
+        ] {
+            assert!(
+                validate_bind_addr(ip(good)).is_ok(),
+                "{good} should be bindable"
+            );
         }
     }
 
     #[test]
     fn bind_validation_rejects_unspecified_and_public() {
-        for bad in ["0.0.0.0", "::", "8.8.8.8", "203.0.113.7", "2001:db8::1", "172.32.0.1"] {
-            assert!(validate_bind_addr(ip(bad)).is_err(), "{bad} must be refused");
+        for bad in [
+            "0.0.0.0",
+            "::",
+            "8.8.8.8",
+            "203.0.113.7",
+            "2001:db8::1",
+            "172.32.0.1",
+        ] {
+            assert!(
+                validate_bind_addr(ip(bad)).is_err(),
+                "{bad} must be refused"
+            );
         }
     }
 

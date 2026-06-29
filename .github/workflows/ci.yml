@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    # tetherd binds to Apple frameworks (ScreenCaptureKit, VideoToolbox,
+    # AppKit) so the workspace only compiles on macOS.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all --check
+      - name: Install build deps
+        run: brew install nasm # turbojpeg-sys SIMD assembler
+      - name: Build (whole workspace, incl. tetherd)
+        run: cargo build --workspace --locked
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --locked -- -D warnings
+      # tether-protocol + tether-signal are GUI-free. tetherd's capture /
+      # encode / clipboard / injection tests need a logged-in GUI session
+      # (Screen Recording, VideoToolbox, NSPasteboard) that headless CI lacks,
+      # so they are run locally during gate verification, not here.
+      - name: Test (GUI-free crates)
+        run: cargo test -p tether-protocol -p tether-signal --locked
+
+  controller:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controller
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: controller/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

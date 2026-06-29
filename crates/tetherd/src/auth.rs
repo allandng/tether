@@ -120,7 +120,10 @@ impl PairingAuth {
         // budget is per-host and only clears on a successful pairing or when the
         // cooldown elapses.
         let code = random_code();
-        self.active = Some(ActiveCode { code: code.clone(), expires_at: now_unix + CODE_TTL.as_secs() });
+        self.active = Some(ActiveCode {
+            code: code.clone(),
+            expires_at: now_unix + CODE_TTL.as_secs(),
+        });
         code
     }
 
@@ -169,16 +172,28 @@ impl PairingAuth {
         Ok(PairOutcome::Paired { token })
     }
 
-    fn issue_token(&mut self, device_id: &str, name: &str, now_unix: u64) -> anyhow::Result<String> {
-        self.allowlist
-            .devices
-            .insert(device_id.to_owned(), PairedDevice { name: name.to_owned(), paired_at: now_unix });
+    fn issue_token(
+        &mut self,
+        device_id: &str,
+        name: &str,
+        now_unix: u64,
+    ) -> anyhow::Result<String> {
+        self.allowlist.devices.insert(
+            device_id.to_owned(),
+            PairedDevice {
+                name: name.to_owned(),
+                paired_at: now_unix,
+            },
+        );
         self.persist()?;
         Ok(self.token_for(device_id, now_unix))
     }
 
     fn token_for(&self, device_id: &str, paired_at: u64) -> String {
-        let mac = hmac(&self.host_key, format!("{device_id}:{paired_at}").as_bytes());
+        let mac = hmac(
+            &self.host_key,
+            format!("{device_id}:{paired_at}").as_bytes(),
+        );
         hex(&mac)
     }
 
@@ -223,7 +238,10 @@ pub fn channel_binding(fp_a: &str, fp_b: &str) -> [u8; 32] {
 }
 
 fn normalize_fp(fp: &str) -> String {
-    fp.chars().filter(|c| !c.is_whitespace() && *c != ':').collect::<String>().to_uppercase()
+    fp.chars()
+        .filter(|c| !c.is_whitespace() && *c != ':')
+        .collect::<String>()
+        .to_uppercase()
 }
 
 /// The proof a controller computes: `HMAC(code, channel_binding)`.
@@ -241,7 +259,10 @@ pub fn group_code(code: &str) -> String {
 }
 
 pub fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn hmac(key: &[u8], msg: &[u8]) -> Vec<u8> {
@@ -300,7 +321,11 @@ fn load_or_create_host_key(path: &Path) -> anyhow::Result<[u8; 32]> {
         }
         let bytes = std::fs::read(path)?;
         if bytes.len() != 32 {
-            bail!("{} is corrupt (expected 32 bytes, got {})", path.display(), bytes.len());
+            bail!(
+                "{} is corrupt (expected 32 bytes, got {})",
+                path.display(),
+                bytes.len()
+            );
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
@@ -369,7 +394,9 @@ mod tests {
 
         let code = a.arm(1000);
         let proof = pairing_proof(&code, &CHAN);
-        let outcome = a.verify_pairing("dev1", "iPad", &proof, &CHAN, 1001).unwrap();
+        let outcome = a
+            .verify_pairing("dev1", "iPad", &proof, &CHAN, 1001)
+            .unwrap();
         let PairOutcome::Paired { token } = outcome else {
             panic!("expected Paired, got {outcome:?}");
         };
@@ -392,7 +419,10 @@ mod tests {
             let mut a = fresh(&dir);
             let code = a.arm(1000);
             let proof = pairing_proof(&code, &CHAN);
-            match a.verify_pairing("dev1", "iPad", &proof, &CHAN, 1001).unwrap() {
+            match a
+                .verify_pairing("dev1", "iPad", &proof, &CHAN, 1001)
+                .unwrap()
+            {
                 PairOutcome::Paired { token } => token,
                 o => panic!("{o:?}"),
             }
@@ -410,10 +440,14 @@ mod tests {
         a.arm(1000);
         // attacker guesses a bad proof
         let bad = vec![0u8; 32];
-        assert_eq!(a.verify_pairing("dev", "x", &bad, &CHAN, 1001).unwrap(), PairOutcome::Rejected);
+        assert_eq!(
+            a.verify_pairing("dev", "x", &bad, &CHAN, 1001).unwrap(),
+            PairOutcome::Rejected
+        );
         // code is consumed — even the correct proof now fails (no active code)
         assert_eq!(
-            a.verify_pairing("dev", "x", &[0u8; 32], &CHAN, 1002).unwrap(),
+            a.verify_pairing("dev", "x", &[0u8; 32], &CHAN, 1002)
+                .unwrap(),
             PairOutcome::NoActiveCode
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -430,7 +464,8 @@ mod tests {
         let proof = pairing_proof(&code, &controller_chan);
         let host_chan = [7u8; 32];
         assert_eq!(
-            a.verify_pairing("dev", "x", &proof, &host_chan, 1001).unwrap(),
+            a.verify_pairing("dev", "x", &proof, &host_chan, 1001)
+                .unwrap(),
             PairOutcome::Rejected
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -443,19 +478,24 @@ mod tests {
         for _ in 0..LOCKOUT_THRESHOLD {
             a.arm(1000); // each wrong attempt consumes the code; re-arm to retry
             assert_eq!(
-                a.verify_pairing("dev", "x", &[0u8; 32], &CHAN, 1000).unwrap(),
+                a.verify_pairing("dev", "x", &[0u8; 32], &CHAN, 1000)
+                    .unwrap(),
                 PairOutcome::Rejected
             );
         }
         // now locked out: even a correct attempt is refused during cooldown
         let code = a.arm(1000);
         let proof = pairing_proof(&code, &CHAN);
-        assert_eq!(a.verify_pairing("dev", "x", &proof, &CHAN, 1000).unwrap(), PairOutcome::LockedOut);
+        assert_eq!(
+            a.verify_pairing("dev", "x", &proof, &CHAN, 1000).unwrap(),
+            PairOutcome::LockedOut
+        );
         // after the cooldown, pairing works again
         let code = a.arm(1000 + LOCKOUT_SECS + 1);
         let proof = pairing_proof(&code, &CHAN);
         assert!(matches!(
-            a.verify_pairing("dev", "x", &proof, &CHAN, 1000 + LOCKOUT_SECS + 2).unwrap(),
+            a.verify_pairing("dev", "x", &proof, &CHAN, 1000 + LOCKOUT_SECS + 2)
+                .unwrap(),
             PairOutcome::Paired { .. }
         ));
         std::fs::remove_dir_all(&dir).ok();
@@ -468,7 +508,8 @@ mod tests {
         let code = a.arm(1000);
         let proof = pairing_proof(&code, &CHAN);
         assert_eq!(
-            a.verify_pairing("dev", "x", &proof, &CHAN, 1000 + CODE_TTL.as_secs() + 1).unwrap(),
+            a.verify_pairing("dev", "x", &proof, &CHAN, 1000 + CODE_TTL.as_secs() + 1)
+                .unwrap(),
             PairOutcome::NoActiveCode
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -491,7 +532,8 @@ mod tests {
         // device is "paired" there
         let mut b = fresh(&dir_b);
         let code_b = b.arm(1000);
-        b.verify_pairing("dev", "x", &pairing_proof(&code_b, &CHAN), &CHAN, 1001).unwrap();
+        b.verify_pairing("dev", "x", &pairing_proof(&code_b, &CHAN), &CHAN, 1001)
+            .unwrap();
         assert!(!b.verify_token("dev", &token));
         std::fs::remove_dir_all(&dir_a).ok();
         std::fs::remove_dir_all(&dir_b).ok();

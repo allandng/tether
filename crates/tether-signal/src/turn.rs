@@ -54,16 +54,16 @@ impl IceConfig {
                 credential: None,
             });
         }
-        if let Some(secret) = &self.turn_secret {
-            if !self.turn_urls.is_empty() {
-                let (username, credential) =
-                    mint_turn_credential(secret, self.turn_ttl, now_unix, userid);
-                servers.push(IceServer {
-                    urls: self.turn_urls.clone(),
-                    username: Some(username),
-                    credential: Some(credential),
-                });
-            }
+        if let Some(secret) = &self.turn_secret
+            && !self.turn_urls.is_empty()
+        {
+            let (username, credential) =
+                mint_turn_credential(secret, self.turn_ttl, now_unix, userid);
+            servers.push(IceServer {
+                urls: self.turn_urls.clone(),
+                username: Some(username),
+                credential: Some(credential),
+            });
         }
         servers
     }
@@ -106,7 +106,10 @@ mod tests {
     fn turn_entry_minted_when_configured() {
         let cfg = IceConfig {
             stun_urls: vec!["stun:s:3478".into()],
-            turn_urls: vec!["turn:t:3478?transport=udp".into(), "turns:t:5349?transport=tcp".into()],
+            turn_urls: vec![
+                "turn:t:3478?transport=udp".into(),
+                "turns:t:5349?transport=tcp".into(),
+            ],
             turn_secret: Some("sekret".into()),
             turn_ttl: 600,
         };

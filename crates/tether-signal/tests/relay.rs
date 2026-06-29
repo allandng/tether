@@ -4,14 +4,20 @@
 use std::net::SocketAddr;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_signal::protocol::{Caps, ClientMessage, ErrorCode, ServerMessage};
 use tether_signal::server::{self, AppState};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 const SECRET: &str = "test-secret";
 
-const HOST_CAPS: Caps = Caps { can_host: true, can_control: true };
-const CONTROLLER_CAPS: Caps = Caps { can_host: false, can_control: true };
+const HOST_CAPS: Caps = Caps {
+    can_host: true,
+    can_control: true,
+};
+const CONTROLLER_CAPS: Caps = Caps {
+    can_host: false,
+    can_control: true,
+};
 
 async fn start_server() -> SocketAddr {
     let state = AppState::new(SECRET.into());
@@ -23,9 +29,8 @@ async fn start_server() -> SocketAddr {
     addr
 }
 
-type Client = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Client =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(addr: SocketAddr) -> Client {
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
@@ -91,7 +96,14 @@ async fn offer_answer_ice_relay_round_trip() {
     register(&mut host, "mac", HOST_CAPS).await;
     register(&mut controller, "ipad", CONTROLLER_CAPS).await;
 
-    send(&mut controller, &ClientMessage::Offer { target: "mac".into(), sdp: "OFFER-SDP".into() }).await;
+    send(
+        &mut controller,
+        &ClientMessage::Offer {
+            target: "mac".into(),
+            sdp: "OFFER-SDP".into(),
+        },
+    )
+    .await;
     match recv_directed(&mut host).await {
         Some(ServerMessage::Offer { from, sdp }) => {
             assert_eq!(from, "ipad");
@@ -100,7 +112,14 @@ async fn offer_answer_ice_relay_round_trip() {
         other => panic!("expected relayed offer, got {other:?}"),
     }
 
-    send(&mut host, &ClientMessage::Answer { target: "ipad".into(), sdp: "ANSWER-SDP".into() }).await;
+    send(
+        &mut host,
+        &ClientMessage::Answer {
+            target: "ipad".into(),
+            sdp: "ANSWER-SDP".into(),
+        },
+    )
+    .await;
     match recv_directed(&mut controller).await {
         Some(ServerMessage::Answer { from, sdp }) => {
             assert_eq!(from, "mac");
@@ -109,7 +128,14 @@ async fn offer_answer_ice_relay_round_trip() {
         other => panic!("expected relayed answer, got {other:?}"),
     }
 
-    send(&mut controller, &ClientMessage::Ice { target: "mac".into(), candidate: "CAND-1".into() }).await;
+    send(
+        &mut controller,
+        &ClientMessage::Ice {
+            target: "mac".into(),
+            candidate: "CAND-1".into(),
+        },
+    )
+    .await;
     match recv_directed(&mut host).await {
         Some(ServerMessage::Ice { from, candidate }) => {
             assert_eq!((from.as_str(), candidate.as_str()), ("ipad", "CAND-1"));
@@ -139,7 +165,10 @@ async fn presence_lists_both_devices() {
             }
         }
     }
-    assert!(saw_both, "host never saw a directory containing both devices");
+    assert!(
+        saw_both,
+        "host never saw a directory containing both devices"
+    );
 }
 
 #[tokio::test]
@@ -162,7 +191,10 @@ async fn bad_secret_is_refused() {
         other => panic!("expected BadAuth, got {other:?}"),
     }
     // connection must be closed after the refusal
-    assert!(recv(&mut ws).await.is_none(), "server must close after bad auth");
+    assert!(
+        recv(&mut ws).await.is_none(),
+        "server must close after bad auth"
+    );
 }
 
 #[tokio::test]
@@ -173,7 +205,14 @@ async fn offer_to_non_host_is_refused() {
     register(&mut a, "phone-a", CONTROLLER_CAPS).await;
     register(&mut b, "phone-b", CONTROLLER_CAPS).await;
 
-    send(&mut a, &ClientMessage::Offer { target: "phone-b".into(), sdp: "X".into() }).await;
+    send(
+        &mut a,
+        &ClientMessage::Offer {
+            target: "phone-b".into(),
+            sdp: "X".into(),
+        },
+    )
+    .await;
     match recv_directed(&mut a).await {
         Some(ServerMessage::Error { code, .. }) => assert_eq!(code, ErrorCode::TargetNotHost),
         other => panic!("expected TargetNotHost, got {other:?}"),
@@ -185,7 +224,14 @@ async fn offer_to_offline_target_is_refused() {
     let addr = start_server().await;
     let mut controller = connect(addr).await;
     register(&mut controller, "ipad", CONTROLLER_CAPS).await;
-    send(&mut controller, &ClientMessage::Offer { target: "ghost".into(), sdp: "X".into() }).await;
+    send(
+        &mut controller,
+        &ClientMessage::Offer {
+            target: "ghost".into(),
+            sdp: "X".into(),
+        },
+    )
+    .await;
     match recv_directed(&mut controller).await {
         Some(ServerMessage::Error { code, .. }) => assert_eq!(code, ErrorCode::UnknownTarget),
         other => panic!("expected UnknownTarget, got {other:?}"),
@@ -196,7 +242,14 @@ async fn offer_to_offline_target_is_refused() {
 async fn message_before_register_is_refused() {
     let addr = start_server().await;
     let mut ws = connect(addr).await;
-    send(&mut ws, &ClientMessage::Ice { target: "mac".into(), candidate: "X".into() }).await;
+    send(
+        &mut ws,
+        &ClientMessage::Ice {
+            target: "mac".into(),
+            candidate: "X".into(),
+        },
+    )
+    .await;
     match recv(&mut ws).await {
         Some(ServerMessage::Error { code, .. }) => assert_eq!(code, ErrorCode::NotRegistered),
         other => panic!("expected NotRegistered, got {other:?}"),
@@ -216,7 +269,10 @@ async fn reregistration_replaces_the_stale_connection() {
     let mut replaced = false;
     for _ in 0..3 {
         match recv(&mut old).await {
-            Some(ServerMessage::Error { code: ErrorCode::Replaced, .. }) => {
+            Some(ServerMessage::Error {
+                code: ErrorCode::Replaced,
+                ..
+            }) => {
                 replaced = true;
                 break;
             }
@@ -232,7 +288,14 @@ async fn reregistration_replaces_the_stale_connection() {
     // offers now route to the new connection
     let mut controller = connect(addr).await;
     register(&mut controller, "ipad", CONTROLLER_CAPS).await;
-    send(&mut controller, &ClientMessage::Offer { target: "mac".into(), sdp: "S".into() }).await;
+    send(
+        &mut controller,
+        &ClientMessage::Offer {
+            target: "mac".into(),
+            sdp: "S".into(),
+        },
+    )
+    .await;
     match recv_directed(&mut new).await {
         Some(ServerMessage::Offer { from, .. }) => assert_eq!(from, "ipad"),
         other => panic!("expected offer on the new connection, got {other:?}"),
