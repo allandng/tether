@@ -366,6 +366,93 @@ async fn second_concurrent_connection_is_rejected() {
 }
 
 #[tokio::test]
+async fn select_display_routes_to_capture() {
+    let mut host = start_host().await;
+    let mut ws = connect(host.addr).await;
+    handshake(&mut ws).await;
+
+    // host announces a multi-display set → controller can pick
+    host.displays_tx
+        .send(vec![
+            tether_protocol::DisplayInfo { id: 1, width: 1920, height: 1080, active: true, name: "1".into() },
+            tether_protocol::DisplayInfo { id: 7, width: 2560, height: 1440, active: false, name: "2".into() },
+        ])
+        .unwrap();
+    assert!(matches!(next_message(&mut ws).await, Some(Message::Displays(_))));
+
+    // controller selects display 7 → host routes it to the capture thread
+    send_msg(&mut ws, &Message::SelectDisplay(tether_protocol::SelectDisplay { id: 7 })).await;
+    let routed = tokio::task::spawn_blocking(move || {
+        host.select_display_rx.recv_timeout(std::time::Duration::from_secs(2))
+    })
+    .await
+    .unwrap()
+    .expect("SelectDisplay not routed to capture");
+    assert_eq!(routed, 7);
+}
+
+#[tokio::test]
+async fn multiple_controllers_up_to_the_cap() {
+    // --max-controllers 2: two connect concurrently, a third is refused.
+    let mut host =
+        start_host_slots(AuthPolicy { require_pairing: false, allow_unpaired: true }, 2).await;
+    let mut a = connect(host.addr).await;
+    handshake(&mut a).await;
+    let mut b = connect(host.addr).await;
+    handshake(&mut b).await;
+
+    // a frame fans out to BOTH controllers
+    host.frames_tx
+        .send(Some(EncodedFrame {
+            codec: Codec::Jpeg,
+            seq: 1,
+            timestamp_micros: 1,
+            payload: Bytes::from_static(b"f"),
+        }))
+        .unwrap();
+    for ws in [&mut a, &mut b] {
+        assert!(matches!(next_message(ws).await, Some(Message::FrameData(_))));
+    }
+
+    // a third over the cap is refused — the server drops the socket before (or
+    // at) the upgrade, so either connect fails or the stream closes silently.
+    let refused = match tokio_tungstenite::connect_async(format!("ws://{}", host.addr)).await {
+        Err(_) => true,
+        Ok((mut c, _)) => {
+            c.send(controller_hello()).await.ok();
+            next_message(&mut c).await.is_none()
+        }
+    };
+    assert!(refused, "third controller must be refused");
+
+    // input from EITHER controller reaches the injector (serialized)
+    a.send(WsMessage::Binary(
+        Message::InputEvent(InputEvent::MouseMove { x: 5, y: 6 }).encode(),
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(host.input_rx.recv().await, Some(InjectCommand::Event(_))));
+
+    // freeing a slot lets a new controller in
+    drop(a);
+    let mut admitted = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let Ok((mut ws, _)) =
+            tokio_tungstenite::connect_async(format!("ws://{}", host.addr)).await
+        else {
+            continue;
+        };
+        ws.send(controller_hello()).await.ok();
+        if matches!(next_message(&mut ws).await, Some(Message::Hello(_))) {
+            admitted = true;
+            break;
+        }
+    }
+    assert!(admitted, "a freed slot must admit a new controller");
+}
+
+#[tokio::test]
 async fn version_mismatch_is_rejected() {
     let host = start_host().await;
     let mut ws = connect(host.addr).await;
