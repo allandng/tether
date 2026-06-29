@@ -13,7 +13,8 @@ for media (peer-to-peer, DTLS-encrypted).
 | 2 — WebRTC | Signaling server, P2P data channels, hardware H.264 (VideoToolbox ↔ WebCodecs) | ✅ Done — [gate results](docs/phase2-gate-results.md) (2.5 Mbps at native res) |
 | 3 — Clipboard | Bidirectional text clipboard sync, paste-keystroke ordering | ✅ Done — [gate results](docs/phase3-gate-results.md) |
 | 4 — Touch UX | Gesture engine (tap/long-press/2-finger scroll/pinch), soft-keyboard TextInput, phone UI | ✅ Done — [gate results](docs/phase4-gate-results.md) (synthetic-touch verified; iPad pass pending) |
-| 5 — Hardening | TURN relay, adaptive bitrate, device pairing auth, multi-monitor, client-drawn cursor | Future |
+| 5 — Secure-internet | Device pairing auth (DTLS-bound, revocable), TURN relay config, adaptive bitrate | ✅ Done — [gate results](docs/phase5-gate-results.md) (live relay traversal pending) |
+| 5b — Further hardening | Multi-monitor, client-drawn cursor, multiple controllers | Future |
 
 Verified end-to-end on a single machine (including connect-while-display-asleep
 → input wakes it). Remaining human checks: a real two-device WAN run and an
@@ -50,8 +51,35 @@ cargo run --release -p tetherd -- --signal 192.168.1.5:7879 --secret <shared-sec
 In the controller UI pick **Signaled**, enter the signal server address, the
 secret, and the host's device id (its hostname unless `--device-id` was set).
 Media flows peer-to-peer (DTLS-encrypted); the signal server only introduces
-the peers. NAT traversal is STUN-only — symmetric-NAT pairs won't connect
-(TURN is deferred).
+the peers.
+
+### Device pairing (Phase 5)
+
+The shared `--secret` only gates the signal server. To authorize a *device*,
+pair it once: start the host with `--pair` (or `--require-pairing` to refuse
+all unpaired controllers), read the printed code, and enter it in the
+controller when prompted. The host issues a per-device token (stored in the
+browser) so future connects need no code. The pairing proof is bound to the
+DTLS fingerprints, so a malicious signal relay can't MITM it. Revoke by
+deleting the device from `~/.config/tether/paired.json`.
+
+### TURN relay (for symmetric NAT)
+
+STUN-only by default — symmetric-NAT pairs won't connect. Run a coturn relay
+(`--use-auth-secret --static-auth-secret <S>`) and point the signal server at
+it; it mints short-lived credentials per registration:
+
+```sh
+TETHER_TURN_SECRET=<S> cargo run --release -p tether-signal -- \
+    --bind 0.0.0.0 --secret <shared-secret> \
+    --turn-url 'turn:relay.example.com:3478?transport=udp' \
+    --turn-url 'turns:relay.example.com:5349?transport=tcp'
+```
+
+### Adaptive bitrate
+
+With `--codec h264`, the host adapts the encoder bitrate to WebRTC send-buffer
+pressure (AIMD between ~600 kbps and the `--bitrate-kbps` ceiling).
 
 Use `--codec h264` over WAN (~2.5 Mbps at native resolution vs ~125 Mbps for
 JPEG). Connecting to a Mac whose display is asleep works: the screen stays

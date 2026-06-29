@@ -53,3 +53,14 @@ each got the simplest choice that doesn't block Phase 2.
 | **ctrl→cmd remap (carried from P3)** | Still not remapped; hardware Ctrl on a non-Mac keyboard isn't translated to Cmd. | A keyboard-settings pass. |
 | **Client-drawn cursor** | Trackpad mode shows no local cursor dot; the host cursor (composited into the capture) is the only feedback, so relative-mode aiming lags by one frame. | Phase 5 (client cursor overlay, already deferred there). |
 | **iPhone fullscreen** | Fullscreen API is iPad-only on iOS; the ⛶ button hides where unsupported. | If a chromeless iPhone experience is needed (add-to-home-screen PWA). |
+
+## Phase 5 additions
+
+| Decision | Phase 5 choice | Revisit when |
+|---|---|---|
+| **Live TURN relay traversal** | Code-complete (signal mints coturn creds; host + controller apply them) but unverifiable on one machine. | Real coturn + symmetric-NAT WAN test. |
+| **Pairing token rotation** | Tokens are long-lived bearer credentials bound to `device_id\|paired_at`; no automatic expiry. Rotate by re-pairing (a new `paired_at` ⇒ new token). | If token theft becomes a concern; add a TTL/refresh. |
+| **device_id squatting DoS** | A peer past the signal `--secret` can register someone else's `device_id` and evict them. Pairing prevents impersonation, not this availability hit. | Phase 5b — authenticate the signal directory, not just relay. |
+| **Signal-server TLS** | Plain `ws://`; the relay sees SDP/ICE (not media). Pairing resists an active MITM, but signaling metadata + the coarse secret are cleartext. | Before any internet-exposed signal server: `wss://` via a reverse proxy. |
+| **AIMD seed-from-last + skip-for-JPEG** | The controller re-pins to the ceiling each session and the AIMD loop runs (harmlessly) even for JPEG. | Polish: seed from the last converged target; skip the loop when codec≠h264. |
+| **multi-monitor / client-drawn cursor / multiple controllers** | Carried over from the original Phase 5 scope; the secure-internet slice deferred them. | Phase 5b. |

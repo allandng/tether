@@ -33,7 +33,6 @@ use tether_signal::protocol::{
 };
 use tracing::{debug, info, warn};
 
-use crate::capture::EncodedFrame;
 use crate::input::InjectCommand;
 use crate::server::ServerState;
 use crate::session::{host_hello, validate_controller_hello};
@@ -231,7 +230,7 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
                         info!(old = %old.controller_id, "replacing active peer session");
                         let _ = old.pc.close().await;
                     }
-                    match answer_offer(config, state, &signal_tx, from.clone(), sdp, ice).await {
+                    match answer_offer(state, &signal_tx, from.clone(), sdp, ice).await {
                         Ok(pc) => *slot = Some(ActivePeer { controller_id: from, pc }),
                         Err(e) => warn!(error = %e, "failed to answer offer"),
                     }
@@ -290,7 +289,6 @@ fn to_rtc_ice(servers: &[ServerIceServer], config: &RtcConfig) -> Vec<RTCIceServ
 }
 
 async fn answer_offer(
-    config: &RtcConfig,
     state: &ServerState,
     signal_tx: &mpsc::UnboundedSender<ClientMessage>,
     from: String,
