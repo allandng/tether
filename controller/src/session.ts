@@ -4,6 +4,7 @@
 
 import {
   CAP_CAN_CONTROL,
+  type DisplayInfo,
   type FrameData,
   type InputEvent,
   type Resolution,
@@ -15,6 +16,7 @@ import {
   encodeHello,
   encodeInputEvent,
   encodePairRequest,
+  encodeSelectDisplay,
   encodeTextInput,
 } from "./protocol";
 import { normalizeCode, pairingProof } from "./pairing";
@@ -37,6 +39,7 @@ export interface SessionEvents {
   onResolution(resolution: Resolution): void;
   onFrame(frame: FrameData): void;
   onClipboard(text: string): void;
+  onDisplays(displays: DisplayInfo[]): void;
   /** Host rejected our token (or we have none) — the user must enter the
    * host's pairing code. Call `submitPairingCode` to proceed. */
   onPairingRequired(): void;
@@ -128,6 +131,12 @@ export class ProtocolSession {
     }
   }
 
+  sendSelectDisplay(id: number): void {
+    if (this.connected) {
+      this.sendBytes(encodeSelectDisplay({ id }));
+    }
+  }
+
   sendText(text: string): void {
     if (this.connected && text.length > 0) {
       this.sendBytes(encodeTextInput({ text }));
@@ -197,6 +206,9 @@ export class ProtocolSession {
             break;
           case "clipboard":
             this.events.onClipboard(message.text);
+            break;
+          case "displays":
+            this.events.onDisplays(message.displays);
             break;
           default:
             console.warn("unexpected message from host:", message.type);

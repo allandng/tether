@@ -12,7 +12,7 @@
 //! — logged in deferred.md.)
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -27,7 +27,7 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use tether_protocol::{ClipboardData, Decoded, FrameData, Message, Resolution};
+use tether_protocol::{ClipboardData, Decoded, Displays, FrameData, Message, Resolution};
 use tether_signal::protocol::{
     Caps, ClientMessage, ErrorCode, IceServer as ServerIceServer, ServerMessage,
 };
@@ -158,14 +158,6 @@ struct ActivePeer {
     pc: Arc<RTCPeerConnection>,
 }
 
-/// Releases the shared single-session permit when the ctl task ends, however
-/// it exits.
-struct SessionGuard(Arc<AtomicBool>);
-impl Drop for SessionGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
 
 async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(&config.signal_url)
@@ -473,18 +465,14 @@ fn wire_ctl_channel(
             let _ = pc.close().await;
             return;
         }
-        // Acquire the single-session permit (shared with the LAN transport)
-        // BEFORE releasing the media/bulk pumps, so a second controller can't
-        // briefly receive frames.
-        let _session_guard = match state.session_active.compare_exchange(
-            false,
-            true,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => SessionGuard(Arc::clone(&state.session_active)),
+        // Acquire a controller permit (shared with the LAN transport, capped at
+        // --max-controllers) BEFORE releasing the media/bulk pumps, so a peer
+        // over the cap can't briefly receive frames. The OwnedSemaphorePermit
+        // releases on every exit path (incl. panic) — no leak.
+        let _permit = match Arc::clone(&state.controller_slots).try_acquire_owned() {
+            Ok(p) => p,
             Err(_) => {
-                warn!("rejecting webrtc controller: a session is already active");
+                warn!("rejecting webrtc controller: controller slots full");
                 let _ = pc.close().await;
                 return;
             }
@@ -499,6 +487,14 @@ fn wire_ctl_channel(
         if dc.send(&Message::Resolution(current).encode()).await.is_err() {
             return;
         }
+        let mut displays = state.displays.clone();
+        let current_displays = displays.borrow_and_update().clone();
+        if !current_displays.is_empty() {
+            let msg = Message::Displays(Displays { displays: current_displays });
+            if dc.send(&msg.encode()).await.is_err() {
+                return;
+            }
+        }
         info!("webrtc controller connected");
 
         loop {
@@ -509,6 +505,15 @@ fn wire_ctl_channel(
                     }
                     let current: Resolution = *resolution.borrow_and_update();
                     if dc.send(&Message::Resolution(current).encode()).await.is_err() {
+                        break;
+                    }
+                }
+                changed = displays.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let list = displays.borrow_and_update().clone();
+                    if dc.send(&Message::Displays(Displays { displays: list }).encode()).await.is_err() {
                         break;
                     }
                 }
@@ -523,6 +528,9 @@ fn wire_ctl_channel(
                         }
                         Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
                             let _ = state.clipboard_in.send(c.text);
+                        }
+                        Ok(Decoded::Message { message: Message::SelectDisplay(s), .. }) => {
+                            let _ = state.select_display.send(s.id);
                         }
                         Ok(Decoded::Unknown { msg_type, .. }) => {
                             debug!(msg_type, "ignoring unknown message type");

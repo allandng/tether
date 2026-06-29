@@ -1,6 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use tokio::net::TcpListener;
@@ -47,9 +46,12 @@ pub struct ServerState {
     pub bitrate: Arc<std::sync::atomic::AtomicU32>,
     /// Adaptive-bitrate ceiling (the configured `--bitrate-kbps`).
     pub bitrate_ceiling_kbps: u32,
-    /// One controller session at a time, shared across BOTH transports so a
-    /// LAN and a WebRTC controller can't both drive the host at once.
-    pub session_active: Arc<AtomicBool>,
+    /// Up to `--max-controllers` sessions, shared across BOTH transports.
+    pub controller_slots: Arc<tokio::sync::Semaphore>,
+    /// The host's displays (active one flagged); republished on switch.
+    pub displays: watch::Receiver<Vec<tether_protocol::DisplayInfo>>,
+    /// Controller → capture thread: switch the active display.
+    pub select_display: std::sync::mpsc::Sender<u32>,
 }
 
 pub struct Server {
@@ -77,30 +79,31 @@ impl Server {
         Ok(self.listener.local_addr()?)
     }
 
-    /// Accept loop. One controller session at a time; extra connections are
-    /// dropped immediately. Returns only on listener error.
+    /// Accept loop. Up to `--max-controllers` sessions (shared with the WebRTC
+    /// transport); extra connections are dropped immediately. Returns only on
+    /// listener error.
     pub async fn run(self) -> anyhow::Result<()> {
-        let session_active = Arc::clone(&self.state.session_active);
         loop {
             let (stream, peer) = self.listener.accept().await.context("accept failed")?;
             if !ip_allowed(&self.allow, peer.ip()) {
                 warn!(%peer, "rejected: not in --allow list");
                 continue; // drop the socket before any protocol bytes
             }
-            if session_active
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                warn!(%peer, "rejected: a controller session is already active");
-                continue;
-            }
+            // RAII permit: dropped when the session task ends (incl. panic), so
+            // a slot can never leak. try_acquire is atomic — no TOCTOU.
+            let permit = match Arc::clone(&self.state.controller_slots).try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!(%peer, "rejected: controller slots full");
+                    continue;
+                }
+            };
             let state = self.state.clone();
-            let active = Arc::clone(&session_active);
             tokio::spawn(async move {
+                let _permit = permit; // held for the session's lifetime
                 if let Err(e) = session::run(stream, peer, state).await {
                     warn!(%peer, error = %e, "session ended with error");
                 }
-                active.store(false, Ordering::Release);
             });
         }
     }

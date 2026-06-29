@@ -31,6 +31,7 @@ function setup(): void {
         <input id="target" type="text" placeholder="host device id" spellcheck="false" />
       </span>
       <button id="connect">Connect</button>
+      <select id="display" hidden title="Active display"></select>
       <button id="clip" hidden title="Copy host clipboard to this device">📋</button>
       <button id="kbd" hidden title="Toggle keyboard">⌨</button>
       <button id="ptr" hidden title="Pointer mode">🖱</button>
@@ -72,6 +73,7 @@ function setup(): void {
       kbdBtn.hidden = !showTouchUi;
       ptrBtn.hidden = !showTouchUi;
       fullBtn.hidden = s !== "connected" || !document.fullscreenEnabled;
+      if (s !== "connected") displaySelect.hidden = true; // repopulated by onDisplays
       if (s === "connected") {
         pairRow.hidden = true;
         canvas.focus();
@@ -95,6 +97,18 @@ function setup(): void {
       // clipboard without fighting browser clipboard-read permissions
       (window as unknown as Record<string, unknown>).__tetherLastClipboard = text;
       void hostClipboard.receive(text);
+    },
+    onDisplays(displays) {
+      // Only offer the picker when there's a real choice.
+      displaySelect.hidden = displays.length < 2;
+      displaySelect.innerHTML = "";
+      for (const d of displays) {
+        const opt = document.createElement("option");
+        opt.value = String(d.id);
+        opt.textContent = `${d.name} (${d.width}×${d.height})`;
+        opt.selected = d.active;
+        displaySelect.appendChild(opt);
+      }
     },
     onPairingRequired() {
       showPairing("Enter the pairing code shown on the host");
@@ -129,6 +143,12 @@ function setup(): void {
   });
   clipBtn.addEventListener("click", () => {
     void hostClipboard.copyNow().then(() => canvas.focus());
+  });
+
+  const displaySelect = $<HTMLSelectElement>("#display");
+  displaySelect.addEventListener("change", () => {
+    active?.selectDisplay(Number(displaySelect.value));
+    canvas.focus();
   });
 
   const pasteFlow = new PasteFlow({

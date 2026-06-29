@@ -37,6 +37,8 @@ const enum MsgType {
   PairResult = 0x08,
   Auth = 0x09,
   AuthResult = 0x0a,
+  Displays = 0x0b,
+  SelectDisplay = 0x0c,
 }
 
 export const MAX_AUTH_FIELD_LEN = 512;
@@ -118,6 +120,24 @@ export interface AuthResult {
   ok: boolean;
 }
 
+export interface DisplayInfo {
+  id: number;
+  width: number;
+  height: number;
+  active: boolean;
+  name: string;
+}
+
+export interface Displays {
+  type: "displays";
+  displays: DisplayInfo[];
+}
+
+export interface SelectDisplay {
+  type: "select_display";
+  id: number;
+}
+
 export type Message =
   | Hello
   | Resolution
@@ -128,7 +148,9 @@ export type Message =
   | PairRequest
   | PairResult
   | Auth
-  | AuthResult;
+  | AuthResult
+  | Displays
+  | SelectDisplay;
 
 export type DecodeResult =
   | { ok: true; message: Message }
@@ -296,6 +318,14 @@ export function encodeAuth(a: Omit<Auth, "type">): Uint8Array {
   }, 1 + cap);
 }
 
+export function encodeSelectDisplay(s: Omit<SelectDisplay, "type">): Uint8Array {
+  return finish((view) => {
+    view.setUint8(4, MsgType.SelectDisplay);
+    view.setUint32(5, s.id, true);
+    return 5;
+  }, 5);
+}
+
 export function encodeMessage(m: Message): Uint8Array {
   switch (m.type) {
     case "hello":
@@ -314,8 +344,11 @@ export function encodeMessage(m: Message): Uint8Array {
       return encodePairRequest(m);
     case "auth":
       return encodeAuth(m);
+    case "select_display":
+      return encodeSelectDisplay(m);
     case "pair_result":
     case "auth_result":
+    case "displays":
       // host→controller only; the controller never sends these
       throw new Error(`controller does not send ${m.type}`);
   }
@@ -409,6 +442,34 @@ export function decodeMessage(data: ArrayBuffer | Uint8Array): DecodeResult {
     case MsgType.AuthResult: {
       if (payloadLen !== 1) return corrupt("bad AuthResult length");
       return ok({ type: "auth_result", ok: view.getUint8(5) !== 0 });
+    }
+    case MsgType.Displays: {
+      if (payloadLen < 1) return corrupt("empty Displays");
+      const count = view.getUint8(5);
+      const displays: DisplayInfo[] = [];
+      let at = 6;
+      for (let i = 0; i < count; i++) {
+        if (at + 13 > bytes.length) return corrupt("truncated Displays entry");
+        const id = view.getUint32(at, true);
+        const width = view.getUint32(at + 4, true);
+        const height = view.getUint32(at + 8, true);
+        const active = view.getUint8(at + 12) !== 0;
+        const r = readField(bytes, view, at + 13);
+        if (!r) return corrupt("bad Displays name");
+        let name: string;
+        try {
+          name = textDecoder.decode(r.field);
+        } catch {
+          return corrupt("Displays name not UTF-8");
+        }
+        displays.push({ id, width, height, active, name });
+        at = r.next;
+      }
+      return ok({ type: "displays", displays });
+    }
+    case MsgType.SelectDisplay: {
+      if (payloadLen !== 4) return corrupt("bad SelectDisplay length");
+      return ok({ type: "select_display", id: view.getUint32(5, true) });
     }
     default:
       return { ok: false, reason: "unknown-type", msgType };

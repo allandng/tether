@@ -49,6 +49,8 @@ mod msg_type {
     pub const PAIR_RESULT: u8 = 0x08;
     pub const AUTH: u8 = 0x09;
     pub const AUTH_RESULT: u8 = 0x0A;
+    pub const DISPLAYS: u8 = 0x0B;
+    pub const SELECT_DISPLAY: u8 = 0x0C;
 }
 
 /// Capability bit: this peer can be controlled (host path exists).
@@ -215,6 +217,33 @@ pub struct AuthResult {
     pub ok: bool,
 }
 
+/// One display the host can capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayInfo {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Whether this is the display currently being captured.
+    pub active: bool,
+    pub name: String,
+}
+
+/// Host → controller: the displays available to capture (sent after the
+/// handshake and whenever the set or active display changes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Displays {
+    pub displays: Vec<DisplayInfo>,
+}
+
+/// Controller → host: switch the active capture to this display id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectDisplay {
+    pub id: u32,
+}
+
+/// Cap on displays in one `Displays` message (a u8 count; nobody has 255).
+pub const MAX_DISPLAYS: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Hello(Hello),
@@ -227,6 +256,8 @@ pub enum Message {
     PairResult(PairResult),
     Auth(Auth),
     AuthResult(AuthResult),
+    Displays(Displays),
+    SelectDisplay(SelectDisplay),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -315,6 +346,22 @@ impl Message {
                 buf.put_u8(msg_type::AUTH_RESULT);
                 buf.put_u8(a.ok as u8);
             }
+            Message::Displays(d) => {
+                debug_assert!(d.displays.len() <= MAX_DISPLAYS);
+                buf.put_u8(msg_type::DISPLAYS);
+                buf.put_u8(d.displays.len() as u8);
+                for disp in &d.displays {
+                    buf.put_u32_le(disp.id);
+                    buf.put_u32_le(disp.width);
+                    buf.put_u32_le(disp.height);
+                    buf.put_u8(disp.active as u8);
+                    put_field(&mut buf, disp.name.as_bytes());
+                }
+            }
+            Message::SelectDisplay(s) => {
+                buf.put_u8(msg_type::SELECT_DISPLAY);
+                buf.put_u32_le(s.id);
+            }
         }
         let total_len = (buf.len() - 4) as u32;
         buf[0..4].copy_from_slice(&total_len.to_le_bytes());
@@ -357,6 +404,10 @@ impl Message {
             msg_type::PAIR_RESULT => Message::PairResult(decode_pair_result(payload, msg_type)?),
             msg_type::AUTH => Message::Auth(decode_auth(payload, msg_type)?),
             msg_type::AUTH_RESULT => Message::AuthResult(decode_auth_result(payload, msg_type)?),
+            msg_type::DISPLAYS => Message::Displays(decode_displays(payload, msg_type)?),
+            msg_type::SELECT_DISPLAY => {
+                Message::SelectDisplay(decode_select_display(payload, msg_type)?)
+            }
             other => return Ok(Decoded::Unknown { msg_type: other, consumed }),
         };
         Ok(Decoded::Message { message, consumed })
@@ -433,6 +484,41 @@ fn decode_auth_result(p: &[u8], t: u8) -> Result<AuthResult, DecodeError> {
         return Err(DecodeError::BadLength(t));
     }
     Ok(AuthResult { ok: p[0] != 0 })
+}
+
+fn decode_displays(p: &[u8], t: u8) -> Result<Displays, DecodeError> {
+    if p.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    let count = p[0] as usize;
+    if count > MAX_DISPLAYS {
+        return Err(DecodeError::InvalidValue("too many displays"));
+    }
+    let mut rest = &p[1..];
+    let mut displays = Vec::with_capacity(count);
+    for _ in 0..count {
+        if rest.len() < 13 {
+            return Err(DecodeError::BadLength(t));
+        }
+        let id = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        let width = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
+        let height = u32::from_le_bytes([rest[8], rest[9], rest[10], rest[11]]);
+        let active = rest[12] != 0;
+        rest = &rest[13..];
+        let name = take_str(&mut rest, t)?;
+        displays.push(DisplayInfo { id, width, height, active, name });
+    }
+    if !rest.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(Displays { displays })
+}
+
+fn decode_select_display(p: &[u8], t: u8) -> Result<SelectDisplay, DecodeError> {
+    if p.len() != 4 {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(SelectDisplay { id: u32::from_le_bytes([p[0], p[1], p[2], p[3]]) })
 }
 
 fn encode_input_event(buf: &mut BytesMut, ev: &InputEvent) {
@@ -678,6 +764,14 @@ mod tests {
             Message::Auth(Auth { device_id: "a1b2c3".into(), token: "tok123".into() }),
             Message::AuthResult(AuthResult { ok: true }),
             Message::AuthResult(AuthResult { ok: false }),
+            Message::Displays(Displays { displays: vec![] }),
+            Message::Displays(Displays {
+                displays: vec![
+                    DisplayInfo { id: 1, width: 3420, height: 2214, active: true, name: "Built-in".into() },
+                    DisplayInfo { id: 2, width: 2560, height: 1440, active: false, name: "Studio Display".into() },
+                ],
+            }),
+            Message::SelectDisplay(SelectDisplay { id: 2 }),
         ]
     }
 
@@ -833,6 +927,34 @@ mod tests {
 
         let auth_result = Message::AuthResult(AuthResult { ok: true });
         assert_eq!(&auth_result.encode()[..], &[2, 0, 0, 0, 0x0A, 1]);
+
+        let select = Message::SelectDisplay(SelectDisplay { id: 0x02 });
+        assert_eq!(&select.encode()[..], &[5, 0, 0, 0, 0x0C, 0x02, 0, 0, 0]);
+
+        // Displays: count=1, id=1, 800x600, active, name "X"
+        let displays = Message::Displays(Displays {
+            displays: vec![DisplayInfo {
+                id: 1,
+                width: 800,
+                height: 600,
+                active: true,
+                name: "X".into(),
+            }],
+        });
+        assert_eq!(
+            &displays.encode()[..],
+            &[
+                18, 0, 0, 0, // total_len
+                0x0B, // Displays
+                1, // count
+                1, 0, 0, 0, // id
+                0x20, 0x03, 0, 0, // 800
+                0x58, 0x02, 0, 0, // 600
+                1, // active
+                1, 0, // name_len = 1
+                0x58, // "X"
+            ]
+        );
     }
 
     #[test]

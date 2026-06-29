@@ -1,7 +1,7 @@
 // LAN WebSocket transport (Phase 1 path, kept as a fallback transport).
 // Protocol logic lives in ProtocolSession; this file only owns the socket.
 
-import type { FrameData, InputEvent, Resolution } from "./protocol";
+import type { DisplayInfo, FrameData, InputEvent, Resolution } from "./protocol";
 import { tokenStore, wsChannelBinding } from "./pairing";
 import { type AuthContext, ProtocolSession } from "./session";
 
@@ -18,6 +18,7 @@ export interface ConnectionEvents {
   onResolution(resolution: Resolution): void;
   onFrame(frame: FrameData): void;
   onClipboard(text: string): void;
+  onDisplays(displays: DisplayInfo[]): void;
   /** Host wants a pairing code entered. */
   onPairingRequired(): void;
   onPairingFailed(): void;
@@ -29,6 +30,7 @@ export interface Transport {
   sendInput(ev: InputEvent): void;
   sendClipboard(text: string): void;
   sendText(text: string): void;
+  selectDisplay(id: number): void;
   /** Submit a host pairing code (after onPairingRequired). */
   submitPairingCode(code: string): void;
   readonly connected: boolean;
@@ -71,6 +73,7 @@ export class TetherConnection implements Transport {
         onResolution: (r) => this.events.onResolution(r),
         onFrame: (f) => this.events.onFrame(f),
         onClipboard: (text) => this.events.onClipboard(text),
+        onDisplays: (d) => this.events.onDisplays(d),
         onPairingRequired: () => this.events.onPairingRequired(),
         onPairingFailed: () => this.events.onPairingFailed(),
         onProtocolError: (detail) => this.fail(detail),
@@ -108,6 +111,10 @@ export class TetherConnection implements Transport {
 
   sendText(text: string): void {
     this.session?.sendText(text);
+  }
+
+  selectDisplay(id: number): void {
+    this.session?.sendSelectDisplay(id);
   }
 
   submitPairingCode(code: string): void {

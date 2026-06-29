@@ -86,7 +86,9 @@ async fn full_pipeline_sustains_gate_framerate() {
             auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
             bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bitrate_ceiling_kbps: 4000,
-            session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            displays: pipeline.displays,
+            select_display: pipeline.select_display,
         },
     )
     .await
@@ -138,6 +140,7 @@ async fn full_pipeline_sustains_gate_framerate() {
             Decoded::Message { message: Message::Resolution(r), .. } => resolution = Some(r),
             Decoded::Message { message: Message::Hello(_), .. } => {}
             Decoded::Message { message: Message::AuthResult(_), .. } => {}
+            Decoded::Message { message: Message::Displays(_), .. } => {}
             other => panic!("unexpected: {other:?}"),
         }
     }

@@ -51,7 +51,11 @@ async fn main() -> anyhow::Result<()> {
         },
         bitrate: pipeline.bitrate,
         bitrate_ceiling_kbps: args.bitrate_kbps,
-        session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            args.max_controllers.max(1) as usize,
+        )),
+        displays: pipeline.displays,
+        select_display: pipeline.select_display,
     };
 
     let lan = match args.bind {

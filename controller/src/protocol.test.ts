@@ -134,6 +134,24 @@ describe("cross-implementation byte vectors (pin the wire format)", () => {
     expect(res).toEqual({ ok: true, message: { type: "pair_result", ok: true, token: "ok" } });
   });
 
+  it("SelectDisplay encodes to the Rust serde shape", () => {
+    const wire = encodeMessage({ type: "select_display", id: 0x02 });
+    expect(Array.from(wire)).toEqual([5, 0, 0, 0, 0x0c, 0x02, 0, 0, 0]);
+  });
+
+  it("decodes a host Displays (matches the Rust byte vector)", () => {
+    const wire = new Uint8Array([
+      18, 0, 0, 0, 0x0b, 1, 1, 0, 0, 0, 0x20, 0x03, 0, 0, 0x58, 0x02, 0, 0, 1, 1, 0, 0x58,
+    ]);
+    expect(decodeMessage(wire)).toEqual({
+      ok: true,
+      message: {
+        type: "displays",
+        displays: [{ id: 1, width: 800, height: 600, active: true, name: "X" }],
+      },
+    });
+  });
+
   it("decodes a host AuthResult", () => {
     expect(decodeMessage(new Uint8Array([2, 0, 0, 0, 0x0a, 1]))).toEqual({
       ok: true,

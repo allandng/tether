@@ -71,6 +71,7 @@ export class WebRtcTransport implements Transport {
         onResolution: (r) => this.events.onResolution(r),
         onFrame: (f) => this.events.onFrame(f),
         onClipboard: (text) => this.events.onClipboard(text),
+        onDisplays: (d) => this.events.onDisplays(d),
         onPairingRequired: () => this.events.onPairingRequired(),
         onPairingFailed: () => this.events.onPairingFailed(),
         onProtocolError: (detail) => this.fail(detail),
@@ -204,6 +205,10 @@ export class WebRtcTransport implements Transport {
   sendText(text: string): void {
     // Small committed text rides the reliable ctl channel via the session.
     this.session?.sendText(text);
+  }
+
+  selectDisplay(id: number): void {
+    this.session?.sendSelectDisplay(id);
   }
 
   submitPairingCode(code: string): void {

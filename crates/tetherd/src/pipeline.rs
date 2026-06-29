@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tokio::sync::watch;
-use tether_protocol::Resolution;
+use tether_protocol::{DisplayInfo, Resolution};
 use tracing::{error, info, warn};
 
 use crate::capture::{EncodedFrame, FrameEncoder, ScreenCapturer};
@@ -14,6 +14,10 @@ pub struct Pipeline {
     /// Requested encoder bitrate (kbps); the adaptive-bitrate loop writes it,
     /// the encode loop applies it. 0 = leave at the codec default.
     pub bitrate: Arc<AtomicU32>,
+    /// The host's displays (with the active one flagged); republished on switch.
+    pub displays: watch::Receiver<Vec<DisplayInfo>>,
+    /// Request a switch of the active capture to a display id.
+    pub select_display: std::sync::mpsc::Sender<u32>,
 }
 
 /// How long to wait between capturer construction attempts when the failure
@@ -39,6 +43,8 @@ where
 {
     let (resolution_tx, resolution_rx) = watch::channel(Resolution { width: 0, height: 0 });
     let (frames_tx, frames_rx) = watch::channel(None);
+    let (displays_tx, displays_rx) = watch::channel(Vec::<DisplayInfo>::new());
+    let (select_tx, select_rx) = std::sync::mpsc::channel::<u32>();
     let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<()>>(1);
     let bitrate = Arc::new(AtomicU32::new(0));
     let bitrate_loop = Arc::clone(&bitrate);
@@ -83,10 +89,27 @@ where
 
             let mut resolution = capturer.resolution();
             let _ = resolution_tx.send(resolution);
+            let _ = displays_tx.send(capturer.displays());
             info!(width = resolution.width, height = resolution.height, "capture started");
 
             let mut seq: u32 = 0;
             loop {
+                // Apply any pending display-switch requests (cheap, between
+                // frames). Drain so only the last request matters.
+                let mut switch_to = None;
+                while let Ok(id) = select_rx.try_recv() {
+                    switch_to = Some(id);
+                }
+                if let Some(id) = switch_to {
+                    match capturer.switch_display(id) {
+                        Ok(()) => {
+                            info!(id, "switched active display");
+                            let _ = displays_tx.send(capturer.displays());
+                        }
+                        Err(e) => warn!(error = %e, id, "display switch failed"),
+                    }
+                }
+
                 let raw = match capturer.next_frame() {
                     Ok(f) => f,
                     Err(e) => {
@@ -126,7 +149,13 @@ where
     init_rx
         .recv()
         .map_err(|_| anyhow::anyhow!("capture thread died during startup"))??;
-    Ok(Pipeline { resolution: resolution_rx, frames: frames_rx, bitrate })
+    Ok(Pipeline {
+        resolution: resolution_rx,
+        frames: frames_rx,
+        bitrate,
+        displays: displays_rx,
+        select_display: select_tx,
+    })
 }
 
 #[cfg(target_os = "macos")]

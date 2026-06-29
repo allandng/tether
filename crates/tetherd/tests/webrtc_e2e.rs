@@ -99,7 +99,9 @@ async fn webrtc_end_to_end_frames_and_input() {
         auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
         bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         bitrate_ceiling_kbps: 4000,
-            session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        displays: pipeline.displays,
+        select_display: pipeline.select_display,
     };
     tokio::spawn(run_host(
         RtcConfig {

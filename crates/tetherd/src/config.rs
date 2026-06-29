@@ -48,6 +48,11 @@ pub struct Args {
     #[arg(long, default_value_t = 4000)]
     pub bitrate_kbps: u32,
 
+    /// Maximum simultaneous controllers (shared across LAN + WebRTC). >1 lets
+    /// several devices view and control at once; input interleaves. Default 1.
+    #[arg(long, default_value_t = 1)]
+    pub max_controllers: u32,
+
     /// Arm a one-time pairing code at startup (printed to the terminal) so a
     /// new controller can pair. Valid 5 minutes.
     #[arg(long)]

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use tether_protocol::{Codec, Resolution};
+use tether_protocol::{Codec, DisplayInfo, Resolution};
 
 /// One captured frame, 32-bit BGRA. Rows may be padded: use `bytes_per_row`
 /// (not `width * 4`) to address rows; encoders receive it as the pitch.
@@ -30,6 +30,24 @@ pub struct EncodedFrame {
 pub trait ScreenCapturer: Send {
     fn resolution(&self) -> Resolution;
     fn next_frame(&mut self) -> anyhow::Result<RawFrame>;
+
+    /// The displays this capturer can target, with `active` marking the one it
+    /// is currently capturing. Default: a single unnamed display from the
+    /// current resolution (fine for fakes and single-display platforms).
+    fn displays(&self) -> Vec<DisplayInfo> {
+        let r = self.resolution();
+        vec![DisplayInfo { id: 0, width: r.width, height: r.height, active: true, name: "Display".into() }]
+    }
+
+    /// Switch the active capture to `id`. Default: only the implicit id 0 is
+    /// valid (single-display platforms).
+    fn switch_display(&mut self, id: u32) -> anyhow::Result<()> {
+        if id == 0 {
+            Ok(())
+        } else {
+            anyhow::bail!("display {id} not available")
+        }
+    }
 }
 
 /// Frame encoder. JPEG (turbojpeg) or H.264 (VideoToolbox), selected at

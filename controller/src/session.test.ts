@@ -19,6 +19,7 @@ function makeSession(token: string | null = null) {
     onResolution: vi.fn(),
     onFrame: vi.fn(),
     onClipboard: vi.fn(),
+    onDisplays: vi.fn(),
     onPairingRequired: vi.fn(),
     onPairingFailed: vi.fn(),
     onProtocolError: vi.fn(),

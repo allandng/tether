@@ -153,6 +153,34 @@ or non-US layouts. Hardware keyboards still use `InputEvent` KeyDown/KeyUp;
 `TextInput` is specifically for on-screen-keyboard character commits. Refused
 above the cap, never truncated.
 
+### 0x07–0x0A — pairing / auth (both directions, Phase 5)
+
+`PairRequest` / `PairResult` / `Auth` / `AuthResult` carry the device-pairing
+handshake (`u16`-length-prefixed fields). See `docs/phase5-gate-results.md` and
+`crates/tetherd/src/auth.rs` for the scheme; they ride the control path before
+any frames flow.
+
+### 0x0B — Displays (host → controller, Phase 5b)
+
+```
+0  u8  count
+1  …   count × { u32 id, u32 width, u32 height, u8 active, u16 name_len, name… }
+```
+
+The displays the host can capture. Sent after auth and whenever the set or the
+active display changes. `width`/`height` are the captured (native) pixels;
+`active` marks the one currently streaming.
+
+### 0x0C — SelectDisplay (controller → host, Phase 5b)
+
+```
+0  u32  id   the display id (from a Displays entry) to switch capture to
+```
+
+The host switches its single capture to that display and re-announces
+`Resolution` + `Displays` to all connected controllers. Shared: all controllers
+view the same display.
+
 ## WebRTC transport mapping (Phase 2)
 
 Three data channels, all carrying the wire format above unchanged:

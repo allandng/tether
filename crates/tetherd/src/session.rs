@@ -8,8 +8,8 @@ use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
-    CAP_CAN_CONTROL, CAP_CAN_HOST, AuthResult, ClipboardData, Decoded, FrameData, Hello, Message,
-    PROTOCOL_VERSION, PairResult, Role,
+    CAP_CAN_CONTROL, CAP_CAN_HOST, AuthResult, ClipboardData, Decoded, Displays, FrameData, Hello,
+    Message, PROTOCOL_VERSION, PairResult, Role,
 };
 use tracing::{debug, info, warn};
 
@@ -58,6 +58,12 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
     if let Some(text) = current_clip {
         send(&mut ws, &Message::ClipboardData(ClipboardData { text })).await?;
     }
+    // ...and the display list, so the controller can offer a picker.
+    let mut displays = state.displays.clone();
+    let current_displays = displays.borrow_and_update().clone();
+    if !current_displays.is_empty() {
+        send(&mut ws, &Message::Displays(Displays { displays: current_displays })).await?;
+    }
 
     loop {
         tokio::select! {
@@ -92,6 +98,13 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
                     send(&mut ws, &Message::ClipboardData(ClipboardData { text })).await?;
                 }
             }
+            changed = displays.changed() => {
+                if changed.is_err() {
+                    bail!("display source closed");
+                }
+                let list = displays.borrow_and_update().clone();
+                send(&mut ws, &Message::Displays(Displays { displays: list })).await?;
+            }
             incoming = ws.next() => {
                 match incoming {
                     None | Some(Ok(WsMessage::Close(_))) => {
@@ -122,6 +135,9 @@ async fn handle_incoming(bytes: &[u8], state: &ServerState) {
         }
         Ok(Decoded::Message { message: Message::ClipboardData(c), .. }) => {
             let _ = state.clipboard_in.send(c.text);
+        }
+        Ok(Decoded::Message { message: Message::SelectDisplay(s), .. }) => {
+            let _ = state.select_display.send(s.id);
         }
         Ok(Decoded::Unknown { msg_type, .. }) => {
             debug!(msg_type, "ignoring unknown message type");

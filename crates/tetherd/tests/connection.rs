@@ -28,6 +28,9 @@ struct TestHost {
     input_rx: mpsc::Receiver<InjectCommand>,
     clipboard_out_tx: watch::Sender<Option<String>>,
     clipboard_in_rx: std::sync::mpsc::Receiver<String>,
+    #[allow(dead_code)]
+    displays_tx: watch::Sender<Vec<tether_protocol::DisplayInfo>>,
+    select_display_rx: std::sync::mpsc::Receiver<u32>,
     auth: std::sync::Arc<tokio::sync::Mutex<PairingAuth>>,
     server_task: tokio::task::JoinHandle<()>,
 }
@@ -51,12 +54,18 @@ fn temp_auth_dir() -> std::path::PathBuf {
 }
 
 async fn start_host_with(policy: AuthPolicy) -> TestHost {
+    start_host_slots(policy, 1).await
+}
+
+async fn start_host_slots(policy: AuthPolicy, slots: usize) -> TestHost {
     let (resolution_tx, resolution_rx) =
         watch::channel(Resolution { width: 1920, height: 1080 });
     let (frames_tx, frames_rx) = watch::channel(None);
     let (input_tx, input_rx) = mpsc::channel(64);
     let (clipboard_out_tx, clipboard_out_rx) = watch::channel(None);
     let (clipboard_in_tx, clipboard_in_rx) = std::sync::mpsc::channel();
+    let (displays_tx, displays_rx) = watch::channel(Vec::new());
+    let (select_display_tx, select_display_rx) = std::sync::mpsc::channel();
     let auth = std::sync::Arc::new(tokio::sync::Mutex::new(
         PairingAuth::load_or_create(&temp_auth_dir()).expect("auth"),
     ));
@@ -74,7 +83,9 @@ async fn start_host_with(policy: AuthPolicy) -> TestHost {
             auth_policy: policy,
             bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bitrate_ceiling_kbps: 4000,
-            session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(slots)),
+            displays: displays_rx,
+            select_display: select_display_tx,
         },
     )
     .await
@@ -90,6 +101,8 @@ async fn start_host_with(policy: AuthPolicy) -> TestHost {
         input_rx,
         clipboard_out_tx,
         clipboard_in_rx,
+        displays_tx,
+        select_display_rx,
         auth,
         server_task,
     }
