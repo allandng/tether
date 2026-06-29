@@ -102,12 +102,12 @@ where
                 }
                 if let Some(id) = switch_to {
                     match capturer.switch_display(id) {
-                        Ok(()) => {
-                            info!(id, "switched active display");
-                            let _ = displays_tx.send(capturer.displays());
-                        }
+                        Ok(()) => info!(id, "switched active display"),
+                        // republish either way: on failure the controller's
+                        // picker still self-corrects to the real active display
                         Err(e) => warn!(error = %e, id, "display switch failed"),
                     }
+                    let _ = displays_tx.send(capturer.displays());
                 }
 
                 let raw = match capturer.next_frame() {

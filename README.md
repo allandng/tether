@@ -14,7 +14,7 @@ for media (peer-to-peer, DTLS-encrypted).
 | 3 — Clipboard | Bidirectional text clipboard sync, paste-keystroke ordering | ✅ Done — [gate results](docs/phase3-gate-results.md) |
 | 4 — Touch UX | Gesture engine (tap/long-press/2-finger scroll/pinch), soft-keyboard TextInput, phone UI | ✅ Done — [gate results](docs/phase4-gate-results.md) (synthetic-touch verified; iPad pass pending) |
 | 5 — Secure-internet | Device pairing auth (DTLS-bound, revocable), TURN relay config, adaptive bitrate | ✅ Done — [gate results](docs/phase5-gate-results.md) (live relay traversal pending) |
-| 5b — Further hardening | Multi-monitor, client-drawn cursor, multiple controllers | Future |
+| 5b — Further hardening | Multi-monitor (switchable), multiple controllers (`--max-controllers`), client-drawn cursor | ✅ Done — [gate results](docs/phase5b-gate-results.md) (multi-display switch pending real hardware) |
 
 Verified end-to-end on a single machine (including connect-while-display-asleep
 → input wakes it). Remaining human checks: a real two-device WAN run and an
@@ -75,6 +75,15 @@ TETHER_TURN_SECRET=<S> cargo run --release -p tether-signal -- \
     --turn-url 'turn:relay.example.com:3478?transport=udp' \
     --turn-url 'turns:relay.example.com:5349?transport=tcp'
 ```
+
+### Multiple controllers & multi-monitor (Phase 5b)
+
+`--max-controllers N` (default 1) lets several paired devices view and control
+at once, shared across both transports; input from all of them interleaves
+into the host. If the host has multiple displays, a picker appears in the
+controller bar — switching is shared (everyone sees the chosen display). In
+trackpad pointer mode the controller draws a local cursor dot for zero-lag
+aiming.
 
 ### Adaptive bitrate
 

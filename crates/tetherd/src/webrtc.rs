@@ -156,6 +156,11 @@ pub async fn run_host(config: RtcConfig, state: ServerState) -> anyhow::Result<(
 struct ActivePeer {
     controller_id: String,
     pc: Arc<RTCPeerConnection>,
+    /// Set true on replace/teardown to force the ctl task to exit — closing the
+    /// peer alone doesn't (the ctl task's own dc Arc keeps its input channel
+    /// alive), so without this its OwnedSemaphorePermit would leak and reject
+    /// the very reconnect the replace exists to enable.
+    shutdown_tx: watch::Sender<bool>,
 }
 
 
@@ -221,9 +226,11 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
                     if let Some(old) = slot.take() {
                         info!(old = %old.controller_id, "replacing active peer session");
                         let _ = old.pc.close().await;
+                        let _ = old.shutdown_tx.send(true); // free its permit promptly
                     }
-                    match answer_offer(state, &signal_tx, from.clone(), sdp, ice).await {
-                        Ok(pc) => *slot = Some(ActivePeer { controller_id: from, pc }),
+                    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+                    match answer_offer(state, &signal_tx, from.clone(), sdp, ice, shutdown_rx).await {
+                        Ok(pc) => *slot = Some(ActivePeer { controller_id: from, pc, shutdown_tx }),
                         Err(e) => warn!(error = %e, "failed to answer offer"),
                     }
                 }
@@ -258,6 +265,7 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
 
     if let Some(peer) = active.lock().await.take() {
         let _ = peer.pc.close().await;
+        let _ = peer.shutdown_tx.send(true);
     }
     writer.abort();
     result
@@ -286,6 +294,7 @@ async fn answer_offer(
     from: String,
     offer_sdp: String,
     ice_servers: Vec<RTCIceServer>,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<Arc<RTCPeerConnection>> {
     let api = APIBuilder::new().build();
     let pc = Arc::new(
@@ -330,15 +339,19 @@ async fn answer_offer(
         let pc_for_dc = Arc::clone(&pc);
         let (authed_tx, authed_rx) = watch::channel(false);
         let mut authed_tx = Some(authed_tx);
+        let mut ctl_shutdown = Some(shutdown_rx);
         pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let state = state.clone();
             let pc_for_dc = Arc::clone(&pc_for_dc);
             let ctl_authed_tx = authed_tx.take(); // moved to the (single) ctl channel
+            let ctl_shutdown = ctl_shutdown.take();
             let authed_rx = authed_rx.clone();
             Box::pin(async move {
                 debug!(label = %dc.label(), "data channel announced");
                 match dc.label() {
-                    "tether-ctl" => wire_ctl_channel(dc, state, pc_for_dc.clone(), ctl_authed_tx),
+                    "tether-ctl" => {
+                        wire_ctl_channel(dc, state, pc_for_dc.clone(), ctl_authed_tx, ctl_shutdown)
+                    }
                     "tether-media" => wire_media_channel(dc, state.clone(), authed_rx),
                     "tether-bulk" => wire_bulk_channel(dc, state, authed_rx),
                     other => debug!(label = %other, "ignoring unexpected data channel"),
@@ -425,6 +438,7 @@ fn wire_ctl_channel(
     state: ServerState,
     pc: Arc<RTCPeerConnection>,
     authed_tx: Option<watch::Sender<bool>>,
+    shutdown: Option<watch::Receiver<bool>>,
 ) {
     let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(256);
     dc.on_message(Box::new(move |msg| {
@@ -456,6 +470,20 @@ fn wire_ctl_channel(
             return;
         }
 
+        // Acquire a controller permit (shared with the LAN transport, capped at
+        // --max-controllers) BEFORE the auth gate, so an over-cap peer is
+        // refused without consuming a one-time pairing code or persisting a
+        // token — matching the LAN path, which acquires at accept time. The
+        // OwnedSemaphorePermit releases on every exit path (incl. panic).
+        let _permit = match Arc::clone(&state.controller_slots).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                warn!("rejecting webrtc controller: controller slots full");
+                let _ = pc.close().await;
+                return;
+            }
+        };
+
         // Device-pairing / token auth gate, bound to the DTLS fingerprints so a
         // malicious signal relay can't MITM the pairing.
         let binding = dtls_channel_binding(&pc).await;
@@ -465,22 +493,11 @@ fn wire_ctl_channel(
             let _ = pc.close().await;
             return;
         }
-        // Acquire a controller permit (shared with the LAN transport, capped at
-        // --max-controllers) BEFORE releasing the media/bulk pumps, so a peer
-        // over the cap can't briefly receive frames. The OwnedSemaphorePermit
-        // releases on every exit path (incl. panic) — no leak.
-        let _permit = match Arc::clone(&state.controller_slots).try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                warn!("rejecting webrtc controller: controller slots full");
-                let _ = pc.close().await;
-                return;
-            }
-        };
         // authenticated + permitted — release the media/bulk pumps
         if let Some(tx) = &authed_tx {
             let _ = tx.send(true);
         }
+        let mut shutdown = shutdown;
 
         let mut resolution = state.resolution.clone();
         let current: Resolution = *resolution.borrow_and_update();
@@ -499,6 +516,12 @@ fn wire_ctl_channel(
 
         loop {
             tokio::select! {
+                // replaced/torn down → exit so the permit drops (closing the pc
+                // alone won't end this task; see ActivePeer::shutdown_tx)
+                _ = wait_shutdown(&mut shutdown) => {
+                    info!("webrtc controller session ended (replaced/teardown)");
+                    break;
+                }
                 changed = resolution.changed() => {
                     if changed.is_err() {
                         break;
@@ -540,6 +563,8 @@ fn wire_ctl_channel(
                 }
             }
         }
+        // release anything this controller held (mid-drag disconnect/replace)
+        let _ = state.input_tx.send(InjectCommand::ReleaseAll).await;
         info!("webrtc controller disconnected");
     });
 }
@@ -607,6 +632,22 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch:
             }
         }
     });
+}
+
+/// Resolve when the peer is shut down (replace/teardown): the watch flips true
+/// or its sender drops. `None` never resolves (defensive — ctl always has one).
+async fn wait_shutdown(rx: &mut Option<watch::Receiver<bool>>) {
+    match rx {
+        Some(r) => loop {
+            if *r.borrow() {
+                return;
+            }
+            if r.changed().await.is_err() {
+                return; // sender gone → treat as shutdown
+            }
+        },
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Wait until the ctl channel authenticates the peer (true), or the gate

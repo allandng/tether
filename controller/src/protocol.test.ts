@@ -162,6 +162,23 @@ describe("cross-implementation byte vectors (pin the wire format)", () => {
       message: { type: "auth_result", ok: false },
     });
   });
+
+  it("rejects a Displays claiming more entries than MAX_DISPLAYS (matches Rust)", () => {
+    // count=200 (> 64), no entries → must be rejected, not loop unboundedly
+    expect(decodeMessage(new Uint8Array([2, 0, 0, 0, 0x0b, 200]))).toMatchObject({
+      ok: false,
+      reason: "corrupt",
+    });
+  });
+
+  it("rejects trailing bytes after a Displays entry (matches Rust strictness)", () => {
+    // a valid 1-entry Displays (from the round-trip vector) with a junk byte appended
+    const valid = [0x0b, 1, 1, 0, 0, 0, 0x20, 0x03, 0, 0, 0x58, 0x02, 0, 0, 1, 1, 0, 0x58];
+    const withJunk = [...valid, 0xff];
+    const len = withJunk.length;
+    const wire = new Uint8Array([len & 0xff, (len >> 8) & 0xff, 0, 0, ...withJunk]);
+    expect(decodeMessage(wire)).toMatchObject({ ok: false, reason: "corrupt" });
+  });
 });
 
 describe("rejects corrupt input", () => {

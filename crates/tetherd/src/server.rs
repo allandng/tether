@@ -101,9 +101,11 @@ impl Server {
             let state = self.state.clone();
             tokio::spawn(async move {
                 let _permit = permit; // held for the session's lifetime
-                if let Err(e) = session::run(stream, peer, state).await {
+                if let Err(e) = session::run(stream, peer, state.clone()).await {
                     warn!(%peer, error = %e, "session ended with error");
                 }
+                // release anything this controller held (mid-drag disconnect)
+                let _ = state.input_tx.send(crate::input::InjectCommand::ReleaseAll).await;
             });
         }
     }

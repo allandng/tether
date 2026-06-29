@@ -138,11 +138,12 @@ export class GestureMachine {
     this.cursorSeeded = config.seedCursor != null || config.bounds.width > 1;
   }
 
-  setMode(mode: Mode): void {
-    // Don't swap coordinate spaces mid-gesture: a HoldDrag anchored in finger
-    // space would teleport to the stale virtual cursor. Defer until idle.
-    if (this.state !== State.Idle) return;
+  /** Returns true if the swap was applied. Deferred (false) mid-gesture: a
+   * HoldDrag anchored in finger space would teleport to the stale cursor. */
+  setMode(mode: Mode): boolean {
+    if (this.state !== State.Idle) return false;
     this.mode = mode;
+    return true;
   }
 
   setBounds(bounds: Rect): void {

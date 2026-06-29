@@ -7,6 +7,7 @@ export const MAX_MESSAGE_LEN = 64 * 1024 * 1024;
 export const MAX_KEY_CODE_LEN = 32;
 export const MAX_CLIPBOARD_LEN = 256 * 1024;
 export const MAX_TEXT_INPUT_LEN = 1024;
+export const MAX_DISPLAYS = 64;
 
 export const CAP_CAN_HOST = 0b01;
 export const CAP_CAN_CONTROL = 0b10;
@@ -446,6 +447,7 @@ export function decodeMessage(data: ArrayBuffer | Uint8Array): DecodeResult {
     case MsgType.Displays: {
       if (payloadLen < 1) return corrupt("empty Displays");
       const count = view.getUint8(5);
+      if (count > MAX_DISPLAYS) return corrupt("too many displays"); // match Rust
       const displays: DisplayInfo[] = [];
       let at = 6;
       for (let i = 0; i < count; i++) {
@@ -465,6 +467,7 @@ export function decodeMessage(data: ArrayBuffer | Uint8Array): DecodeResult {
         displays.push({ id, width, height, active, name });
         at = r.next;
       }
+      if (at !== bytes.length) return corrupt("trailing bytes in Displays"); // match Rust
       return ok({ type: "displays", displays });
     }
     case MsgType.SelectDisplay: {

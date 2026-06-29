@@ -73,7 +73,10 @@ function setup(): void {
       kbdBtn.hidden = !showTouchUi;
       ptrBtn.hidden = !showTouchUi;
       fullBtn.hidden = s !== "connected" || !document.fullscreenEnabled;
-      if (s !== "connected") displaySelect.hidden = true; // repopulated by onDisplays
+      if (s !== "connected") {
+        displaySelect.hidden = true; // repopulated by onDisplays
+        input?.cancelGesture(); // hide the trackpad cursor + release any held button
+      }
       if (s === "connected") {
         pairRow.hidden = true;
         canvas.focus();

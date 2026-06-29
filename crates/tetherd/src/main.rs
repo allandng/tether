@@ -19,7 +19,7 @@ async fn main() -> anyhow::Result<()> {
 
     let pipeline = start_capture(args.codec, args.bitrate_kbps)?;
     let (input_tx, input_rx) = mpsc::channel(256);
-    start_injector(input_rx);
+    start_injector(input_rx, pipeline.displays.clone());
     let clipboard = start_clipboard()?;
 
     // Device pairing state (host key + allowlist), shared across sessions.
@@ -133,7 +133,10 @@ fn start_capture(
 /// (System Settings → Privacy & Security → Accessibility) — without it macOS
 /// silently discards posted events.
 #[cfg(target_os = "macos")]
-fn start_injector(mut input_rx: mpsc::Receiver<InjectCommand>) {
+fn start_injector(
+    mut input_rx: mpsc::Receiver<InjectCommand>,
+    displays: tokio::sync::watch::Receiver<Vec<tether_protocol::DisplayInfo>>,
+) {
     use tetherd::input::InputInjector;
     std::thread::spawn(move || {
         let mut injector = match tetherd::input::macos::MacInjector::new() {
@@ -144,9 +147,18 @@ fn start_injector(mut input_rx: mpsc::Receiver<InjectCommand>) {
             }
         };
         while let Some(cmd) = input_rx.blocking_recv() {
+            // Point input at whatever display is currently captured (cheap
+            // sync borrow; only acts on an actual change).
+            if let Some(active) = displays.borrow().iter().find(|d| d.active) {
+                injector.set_active_display(active.id);
+            }
             let result = match &cmd {
                 InjectCommand::Event(ev) => injector.inject(ev),
                 InjectCommand::Text(text) => injector.inject_text(text),
+                InjectCommand::ReleaseAll => {
+                    injector.release_all();
+                    Ok(())
+                }
             };
             if let Err(e) = result {
                 tracing::warn!(error = %e, "inject failed");
@@ -156,7 +168,10 @@ fn start_injector(mut input_rx: mpsc::Receiver<InjectCommand>) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn start_injector(mut input_rx: mpsc::Receiver<InjectCommand>) {
+fn start_injector(
+    mut input_rx: mpsc::Receiver<InjectCommand>,
+    _displays: tokio::sync::watch::Receiver<Vec<tether_protocol::DisplayInfo>>,
+) {
     tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
 }
 

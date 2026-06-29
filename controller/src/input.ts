@@ -242,9 +242,12 @@ export function attachInput(
 
   return {
     setMode: (mode: Mode) => {
-      gestures.setMode(mode);
-      currentMode = mode;
-      if (mode !== "trackpad") viewer.hideCursor();
+      // Only mirror the input-layer mode if the machine actually applied it
+      // (it defers mid-gesture), or currentMode would desync from the engine.
+      if (gestures.setMode(mode)) {
+        currentMode = mode;
+        if (mode !== "trackpad") viewer.hideCursor();
+      }
     },
     /** Flush any in-flight gesture, releasing a held button on the CURRENT
      * transport. Call before swapping/closing transports so a HoldDrag's

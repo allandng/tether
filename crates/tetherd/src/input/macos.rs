@@ -59,7 +59,8 @@ mod user_activity {
 
 pub struct MacInjector {
     source: CGEventSource,
-    bounds: CGRect, // main display, in points
+    bounds: CGRect, // active display, in points
+    display_id: u32, // active display (normalized coords map onto this)
     pos: CGPoint,
     held: [bool; 3], // left, middle, right
     flags: CGEventFlags,
@@ -72,10 +73,12 @@ impl MacInjector {
     pub fn new() -> anyhow::Result<Self> {
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|()| anyhow!("failed to create CGEventSource"))?;
-        let bounds = CGDisplay::main().bounds();
+        let main = CGDisplay::main();
+        let bounds = main.bounds();
         Ok(MacInjector {
             source,
             bounds,
+            display_id: main.id,
             pos: CGPoint::new(
                 bounds.origin.x + bounds.size.width / 2.0,
                 bounds.origin.y + bounds.size.height / 2.0,
@@ -239,6 +242,33 @@ impl InputInjector for MacInjector {
             .map_err(|()| anyhow!("failed to create text keyup event"))?;
         up.post(CGEventTapLocation::HID);
         Ok(())
+    }
+
+    /// Release every held mouse button and clear modifier flags. Called when a
+    /// controller session ends so a mid-drag disconnect can't strand a button.
+    fn release_all(&mut self) {
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            if self.held[button_index(button)] {
+                self.held[button_index(button)] = false;
+                let (event_type, cg_button) = button_up_type(button);
+                if let Ok(event) =
+                    CGEvent::new_mouse_event(self.source.clone(), event_type, self.pos, cg_button)
+                {
+                    event.post(CGEventTapLocation::HID);
+                }
+            }
+        }
+        self.flags = CGEventFlags::CGEventFlagNull;
+    }
+
+    /// Point subsequent normalized coordinates at `display_id` (multi-monitor
+    /// switch). Normalized 0..65535 then spans that display's bounds.
+    fn set_active_display(&mut self, display_id: u32) {
+        if display_id == self.display_id {
+            return;
+        }
+        self.bounds = CGDisplay::new(display_id).bounds();
+        self.display_id = display_id;
     }
 }
 
