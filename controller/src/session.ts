@@ -17,7 +17,9 @@ import {
   encodePairRequest,
   encodeTextInput,
 } from "./protocol";
-import { pairingProof } from "./pairing";
+import { normalizeCode, pairingProof } from "./pairing";
+
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 
 /** Per-host identity + token storage + transport-specific channel binding the
  * session needs to authenticate or pair. */
@@ -48,6 +50,7 @@ type Phase = "hello" | "authenticating" | "pairing" | "connected";
 
 export class ProtocolSession {
   private phase: Phase = "hello";
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly events: SessionEvents,
@@ -58,6 +61,7 @@ export class ProtocolSession {
   /** Call when the transport is ready to carry bytes: sends our Hello. */
   start(): void {
     this.phase = "hello";
+    this.armHandshakeTimeout();
     this.sendBytes(
       encodeHello({
         version: PROTOCOL_VERSION,
@@ -67,6 +71,31 @@ export class ProtocolSession {
     );
   }
 
+  /** A stalled handshake (no host response, lost pairing reply) must not hang
+   * the UI silently; abort it so the transport tears down. The pairing phase
+   * is exempt — it waits on a human entering a code. */
+  private armHandshakeTimeout(): void {
+    if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = setTimeout(() => {
+      if (this.phase !== "connected" && this.phase !== "pairing") {
+        this.events.onProtocolError("handshake timed out");
+      }
+    }, HANDSHAKE_TIMEOUT_MS);
+  }
+
+  private clearHandshakeTimeout(): void {
+    if (this.handshakeTimer) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
+    }
+  }
+
+  private connect(): void {
+    this.clearHandshakeTimeout();
+    this.phase = "connected";
+    this.events.onConnected();
+  }
+
   get connected(): boolean {
     return this.phase === "connected";
   }
@@ -74,9 +103,10 @@ export class ProtocolSession {
   /** User entered the host's pairing code; compute the channel-bound proof and
    * send a PairRequest. */
   async submitPairingCode(code: string): Promise<void> {
+    if (this.phase !== "authenticating") return; // ignore double-submit / stray calls
     try {
       const binding = await this.auth.channelBinding();
-      const proof = await pairingProof(code.trim().toUpperCase().replace(/-/g, ""), binding);
+      const proof = await pairingProof(normalizeCode(code), binding);
       this.phase = "pairing";
       this.sendBytes(
         encodePairRequest({ deviceId: this.auth.deviceId, name: this.auth.deviceName, proof }),
@@ -134,11 +164,12 @@ export class ProtocolSession {
       case "authenticating": {
         if (message.type === "auth_result") {
           if (message.ok) {
-            this.phase = "connected";
-            this.events.onConnected();
+            this.connect();
           } else {
             this.events.onPairingRequired(); // need a code from the host
           }
+        } else {
+          this.events.onProtocolError(`unexpected ${message.type} during auth`);
         }
         return;
       }
@@ -146,12 +177,13 @@ export class ProtocolSession {
         if (message.type === "pair_result") {
           if (message.ok) {
             this.auth.setToken(message.token);
-            this.phase = "connected";
-            this.events.onConnected();
+            this.connect();
           } else {
             this.phase = "authenticating"; // let the user retry a code
             this.events.onPairingFailed();
           }
+        } else {
+          this.events.onProtocolError(`unexpected ${message.type} during pairing`);
         }
         return;
       }

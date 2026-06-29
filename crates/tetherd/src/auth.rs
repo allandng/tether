@@ -73,6 +73,9 @@ pub struct PairingAuth {
     active: Option<ActiveCode>,
     fail_count: u32,
     locked_until: u64,
+    /// How many lockouts have tripped since the last success — drives an
+    /// escalating cooldown so a throttled grinder backs off exponentially.
+    lockout_count: u32,
 }
 
 impl PairingAuth {
@@ -91,6 +94,7 @@ impl PairingAuth {
             active: None,
             fail_count: 0,
             locked_until: 0,
+            lockout_count: 0,
         })
     }
 
@@ -148,13 +152,19 @@ impl PairingAuth {
         if !ok {
             self.fail_count += 1;
             if self.fail_count >= LOCKOUT_THRESHOLD {
-                self.locked_until = now_unix + LOCKOUT_SECS;
+                // Escalating cooldown: LOCKOUT_SECS << (lockout_count), capped,
+                // so repeated throttled grinding backs off exponentially. Only
+                // a successful pairing clears the escalation.
+                let shift = self.lockout_count.min(10);
+                self.locked_until = now_unix + LOCKOUT_SECS.saturating_mul(1u64 << shift);
+                self.lockout_count += 1;
                 self.fail_count = 0;
             }
             return Ok(PairOutcome::Rejected);
         }
 
         self.fail_count = 0;
+        self.lockout_count = 0;
         let token = self.issue_token(device_id, name, now_unix)?;
         Ok(PairOutcome::Paired { token })
     }

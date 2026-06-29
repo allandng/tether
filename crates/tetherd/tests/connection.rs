@@ -74,6 +74,7 @@ async fn start_host_with(policy: AuthPolicy) -> TestHost {
             auth_policy: policy,
             bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bitrate_ceiling_kbps: 4000,
+            session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     )
     .await

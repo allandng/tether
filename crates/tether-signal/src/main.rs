@@ -30,9 +30,10 @@ struct Args {
     #[arg(long = "turn-url")]
     turn_urls: Vec<String>,
 
-    /// coturn static-auth-secret for minting ephemeral TURN credentials. Prefer
-    /// TETHER_TURN_SECRET (env) over the flag, which is visible in `ps`.
-    #[arg(long, env = "TETHER_TURN_SECRET")]
+    /// coturn static-auth-secret for minting ephemeral TURN credentials.
+    /// Env-only (TETHER_TURN_SECRET) — never a CLI flag, which would be visible
+    /// in `ps`.
+    #[arg(env = "TETHER_TURN_SECRET", hide = true)]
     turn_secret: Option<String>,
 
     /// TURN credential lifetime in seconds (absolute expiry = now + ttl).

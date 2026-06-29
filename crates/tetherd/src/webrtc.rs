@@ -12,7 +12,7 @@
 //! — logged in deferred.md.)
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -157,6 +157,15 @@ pub async fn run_host(config: RtcConfig, state: ServerState) -> anyhow::Result<(
 struct ActivePeer {
     controller_id: String,
     pc: Arc<RTCPeerConnection>,
+}
+
+/// Releases the shared single-session permit when the ctl task ends, however
+/// it exits.
+struct SessionGuard(Arc<AtomicBool>);
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Result<()> {
@@ -319,19 +328,29 @@ async fn answer_offer(
         }));
     }
 
-    // The controller creates both channels; wire them up as they arrive.
+    // The controller creates all channels; wire them up as they arrive. The
+    // media + bulk pumps must NOT stream until the ctl channel authenticates,
+    // or an unpaired peer that merely knows the signal secret could open
+    // tether-media/tether-bulk and receive the screen / read-write the
+    // clipboard without ever passing the auth gate. `authed` is the shared
+    // gate: the ctl channel flips it true on success; dropping the sender
+    // (auth failure / ctl never opens) makes the other pumps bail.
     {
         let state = state.clone();
         let pc_for_dc = Arc::clone(&pc);
+        let (authed_tx, authed_rx) = watch::channel(false);
+        let mut authed_tx = Some(authed_tx);
         pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let state = state.clone();
             let pc_for_dc = Arc::clone(&pc_for_dc);
+            let ctl_authed_tx = authed_tx.take(); // moved to the (single) ctl channel
+            let authed_rx = authed_rx.clone();
             Box::pin(async move {
                 debug!(label = %dc.label(), "data channel announced");
                 match dc.label() {
-                    "tether-ctl" => wire_ctl_channel(dc, state, pc_for_dc.clone()),
-                    "tether-media" => wire_media_channel(dc, state.clone()),
-                    "tether-bulk" => wire_bulk_channel(dc, state),
+                    "tether-ctl" => wire_ctl_channel(dc, state, pc_for_dc.clone(), ctl_authed_tx),
+                    "tether-media" => wire_media_channel(dc, state.clone(), authed_rx),
+                    "tether-bulk" => wire_bulk_channel(dc, state, authed_rx),
                     other => debug!(label = %other, "ignoring unexpected data channel"),
                 }
             })
@@ -407,7 +426,16 @@ async fn run_auth_gate(
 }
 
 /// Control channel: Hello handshake, device auth, Resolution, input events.
-fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState, pc: Arc<RTCPeerConnection>) {
+/// `authed_tx` gates the media/bulk pumps — flipped true once authenticated;
+/// dropped (without sending) on any failure so those pumps bail and never
+/// stream to an unauthenticated peer. Auth failure tears down the whole peer
+/// connection, not just this channel.
+fn wire_ctl_channel(
+    dc: Arc<RTCDataChannel>,
+    state: ServerState,
+    pc: Arc<RTCPeerConnection>,
+    authed_tx: Option<watch::Sender<bool>>,
+) {
     let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(256);
     dc.on_message(Box::new(move |msg| {
         let in_tx = in_tx.clone();
@@ -418,19 +446,20 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState, pc: Arc<RTCPeer
 
     tokio::spawn(async move {
         // Handshake: the controller speaks first, and only after the channel
-        // opens, so replies are safe to send from here on.
+        // opens, so replies are safe to send from here on. Any early return
+        // drops authed_tx, signalling the media/bulk pumps to bail.
         let Some(first) = in_rx.recv().await else { return };
         let hello = match Message::decode(&first) {
             Ok(Decoded::Message { message: Message::Hello(h), .. }) => h,
             other => {
                 warn!(?other, "expected Hello on ctl channel");
-                let _ = dc.close().await;
+                let _ = pc.close().await;
                 return;
             }
         };
         if let Err(reason) = validate_controller_hello(&hello) {
             warn!(%reason, "rejecting controller");
-            let _ = dc.close().await;
+            let _ = pc.close().await;
             return;
         }
         if dc.send(&host_hello().encode()).await.is_err() {
@@ -441,8 +470,30 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState, pc: Arc<RTCPeer
         // malicious signal relay can't MITM the pairing.
         let binding = dtls_channel_binding(&pc).await;
         if !run_auth_gate(&dc, &mut in_rx, &state, &binding).await {
-            let _ = dc.close().await;
+            // Tear down the ENTIRE peer connection, not just ctl — otherwise the
+            // already-open media/bulk channels would keep their pumps alive.
+            let _ = pc.close().await;
             return;
+        }
+        // Acquire the single-session permit (shared with the LAN transport)
+        // BEFORE releasing the media/bulk pumps, so a second controller can't
+        // briefly receive frames.
+        let _session_guard = match state.session_active.compare_exchange(
+            false,
+            true,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => SessionGuard(Arc::clone(&state.session_active)),
+            Err(_) => {
+                warn!("rejecting webrtc controller: a session is already active");
+                let _ = pc.close().await;
+                return;
+            }
+        };
+        // authenticated + permitted — release the media/bulk pumps
+        if let Some(tx) = &authed_tx {
+            let _ = tx.send(true);
         }
 
         let mut resolution = state.resolution.clone();
@@ -490,15 +541,22 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState, pc: Arc<RTCPeer
 /// Bulk channel: messages too large for a single data-channel message
 /// (SCTP implementations cap at ~64 KiB), carried via the same chunk framing
 /// as media. Clipboard both directions today; file transfer later.
-fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
-    // inbound: reassemble → decode → dispatch (clipboard only, for now)
+fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch::Receiver<bool>) {
+    // inbound: reassemble → decode → dispatch (clipboard only, for now).
+    // Dropped until the peer is authenticated, so an unpaired peer can't write
+    // the host pasteboard.
     let reassembler = Arc::new(Mutex::new(FrameReassembler::default()));
     {
         let state = state.clone();
+        let authed_in = authed.clone();
         dc.on_message(Box::new(move |msg| {
             let reassembler = reassembler.clone();
             let state = state.clone();
+            let authed_in = authed_in.clone();
             Box::pin(async move {
+                if !*authed_in.borrow() {
+                    return; // not authenticated yet — ignore inbound clipboard
+                }
                 debug!(len = msg.data.len(), "bulk chunk received");
                 let Some(wire) = reassembler.lock().await.on_chunk(&msg.data) else {
                     return;
@@ -514,6 +572,7 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
     }
 
     // outbound: host clipboard, chunked; includes the current value at open
+    let mut authed = authed;
     let opened = Arc::new(tokio::sync::Notify::new());
     {
         let opened = opened.clone();
@@ -524,6 +583,9 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
     }
     tokio::spawn(async move {
         opened.notified().await;
+        if !await_authed(&mut authed).await {
+            return; // peer never authenticated; send nothing
+        }
         let mut clipboard = state.clipboard_out.clone();
         clipboard.mark_changed();
         let mut bulk_seq: u32 = 0;
@@ -541,9 +603,23 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
     });
 }
 
+/// Wait until the ctl channel authenticates the peer (true), or the gate
+/// sender is dropped on auth failure (false). Gates the screen/clipboard pumps.
+async fn await_authed(rx: &mut watch::Receiver<bool>) -> bool {
+    loop {
+        if *rx.borrow() {
+            return true;
+        }
+        if rx.changed().await.is_err() {
+            return false; // ctl auth failed / channel gone
+        }
+    }
+}
+
 /// Media channel: pump encoded frames out as chunks, latest-wins under
-/// backpressure (skip frames while the SCTP buffer is deep).
-fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
+/// backpressure (skip frames while the SCTP buffer is deep). Streams nothing
+/// until the ctl channel has authenticated the peer.
+fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch::Receiver<bool>) {
     const MAX_BUFFERED: usize = 1_000_000;
     const BITRATE_FLOOR_KBPS: u32 = 600;
 
@@ -558,7 +634,8 @@ fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
 
     // Adaptive-bitrate loop: sample the send buffer and steer the shared
     // encoder bitrate via AIMD. Only meaningful for H.264 (JPEG ignores
-    // set_bitrate); harmless either way.
+    // set_bitrate); harmless either way. No data leaves here, so it need not
+    // wait on auth, but it must stop the moment the channel leaves Open.
     {
         let dc = dc.clone();
         let bitrate = state.bitrate.clone();
@@ -569,10 +646,9 @@ fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
                 tokio::time::interval(std::time::Duration::from_millis(crate::adaptive::SAMPLE_INTERVAL_MS));
             loop {
                 tick.tick().await;
-                // stop when the channel closes
                 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
-                if dc.ready_state() == RTCDataChannelState::Closed {
-                    return;
+                if dc.ready_state() != RTCDataChannelState::Open {
+                    return; // Closing/Closed → stop promptly, don't leak the task
                 }
                 let buffered = dc.buffered_amount().await;
                 let target = controller.sample(buffered);
@@ -581,8 +657,12 @@ fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
         });
     }
 
+    let mut authed = authed;
     tokio::spawn(async move {
         opened.notified().await;
+        if !await_authed(&mut authed).await {
+            return; // peer never authenticated; stream nothing
+        }
         let mut frames = state.frames.clone();
         frames.mark_changed(); // a mid-stream joiner gets the current frame
         while frames.changed().await.is_ok() {

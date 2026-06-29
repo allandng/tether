@@ -86,6 +86,7 @@ async fn full_pipeline_sustains_gate_framerate() {
             auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
             bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             bitrate_ceiling_kbps: 4000,
+            session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
     )
     .await

@@ -170,6 +170,9 @@ impl FrameEncoder for VtH264Encoder {
     /// Retune the live session's average bitrate (adaptive bitrate). Applies on
     /// subsequent frames; safe between `encode` calls on the capture thread.
     fn set_bitrate(&mut self, kbps: u32) {
+        if kbps == 0 {
+            return; // never clamp the live session to 0 bps
+        }
         let bps = (kbps as i32).saturating_mul(1000);
         if bps == self.bitrate_bps {
             return;

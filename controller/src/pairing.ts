@@ -7,13 +7,26 @@
 
 const subtle = (): SubtleCrypto => {
   const c = globalThis.crypto?.subtle;
-  if (!c) throw new Error("WebCrypto unavailable (needs a secure context)");
+  if (!c) {
+    throw new Error("pairing needs WebCrypto — serve the controller over HTTPS or http://localhost");
+  }
   return c;
 };
 
 /** Match the Rust `normalize_fp`: drop whitespace and ':', uppercase. */
 export function normalizeFp(fp: string): string {
   return fp.replace(/[\s:]/g, "").toUpperCase();
+}
+
+/** Canonicalize a typed pairing code to the host's alphabet: strip grouping
+ * dashes/spaces, uppercase, and apply Crockford base32 typo substitutions
+ * (I/L→1, O→0) so a misread digit still verifies. */
+export function normalizeCode(code: string): string {
+  return code
+    .replace(/[\s-]/g, "")
+    .toUpperCase()
+    .replace(/[IL]/g, "1") // Crockford: I, L → 1
+    .replace(/O/g, "0"); // Crockford: O → 0
 }
 
 /** SHA-256 channel binding from two fingerprints, order-independent. */

@@ -99,6 +99,7 @@ async fn webrtc_end_to_end_frames_and_input() {
         auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
         bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         bitrate_ceiling_kbps: 4000,
+            session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     tokio::spawn(run_host(
         RtcConfig {
@@ -249,6 +250,14 @@ async fn webrtc_end_to_end_frames_and_input() {
         panic!("expected host Hello");
     };
     assert_eq!(h.role, Role::Host);
+
+    // REGRESSION (Phase 5 critical review finding): media must NOT stream before
+    // the ctl channel authenticates — give the pump a moment, then assert silence.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        media_rx.try_recv().is_err(),
+        "media channel leaked frames before authentication"
+    );
 
     // auth gate is off (allow_unpaired); send Auth and expect AuthResult{ok}
     ctl.send(&Message::Auth(Auth { device_id: "ipad".into(), token: String::new() }).encode())

@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         },
         bitrate: pipeline.bitrate,
         bitrate_ceiling_kbps: args.bitrate_kbps,
+        session_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     let lan = match args.bind {

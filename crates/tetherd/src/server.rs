@@ -47,6 +47,9 @@ pub struct ServerState {
     pub bitrate: Arc<std::sync::atomic::AtomicU32>,
     /// Adaptive-bitrate ceiling (the configured `--bitrate-kbps`).
     pub bitrate_ceiling_kbps: u32,
+    /// One controller session at a time, shared across BOTH transports so a
+    /// LAN and a WebRTC controller can't both drive the host at once.
+    pub session_active: Arc<AtomicBool>,
 }
 
 pub struct Server {
@@ -77,7 +80,7 @@ impl Server {
     /// Accept loop. One controller session at a time; extra connections are
     /// dropped immediately. Returns only on listener error.
     pub async fn run(self) -> anyhow::Result<()> {
-        let session_active = Arc::new(AtomicBool::new(false));
+        let session_active = Arc::clone(&self.state.session_active);
         loop {
             let (stream, peer) = self.listener.accept().await.context("accept failed")?;
             if !ip_allowed(&self.allow, peer.ip()) {
