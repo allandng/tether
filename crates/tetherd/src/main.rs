@@ -49,6 +49,8 @@ async fn main() -> anyhow::Result<()> {
             require_pairing: args.require_pairing,
             allow_unpaired: args.allow_unpaired,
         },
+        bitrate: pipeline.bitrate,
+        bitrate_ceiling_kbps: args.bitrate_kbps,
     };
 
     let lan = match args.bind {

@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use tokio::sync::watch;
 use tether_protocol::Resolution;
 use tracing::{error, info, warn};
@@ -8,6 +11,9 @@ use crate::capture::{EncodedFrame, FrameEncoder, ScreenCapturer};
 pub struct Pipeline {
     pub resolution: watch::Receiver<Resolution>,
     pub frames: watch::Receiver<Option<EncodedFrame>>,
+    /// Requested encoder bitrate (kbps); the adaptive-bitrate loop writes it,
+    /// the encode loop applies it. 0 = leave at the codec default.
+    pub bitrate: Arc<AtomicU32>,
 }
 
 /// How long to wait between capturer construction attempts when the failure
@@ -34,6 +40,8 @@ where
     let (resolution_tx, resolution_rx) = watch::channel(Resolution { width: 0, height: 0 });
     let (frames_tx, frames_rx) = watch::channel(None);
     let (init_tx, init_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<()>>(1);
+    let bitrate = Arc::new(AtomicU32::new(0));
+    let bitrate_loop = Arc::clone(&bitrate);
 
     std::thread::Builder::new()
         .name("tether-capture".into())
@@ -92,6 +100,11 @@ where
                     resolution = current;
                     let _ = resolution_tx.send(resolution);
                 }
+                // apply any adaptive-bitrate request (0 = leave at default)
+                let requested = bitrate_loop.load(Ordering::Relaxed);
+                if requested != 0 {
+                    encoder.set_bitrate(requested);
+                }
                 match encoder.encode(&raw) {
                     Ok(payload) => {
                         seq = seq.wrapping_add(1);
@@ -113,7 +126,7 @@ where
     init_rx
         .recv()
         .map_err(|_| anyhow::anyhow!("capture thread died during startup"))??;
-    Ok(Pipeline { resolution: resolution_rx, frames: frames_rx })
+    Ok(Pipeline { resolution: resolution_rx, frames: frames_rx, bitrate })
 }
 
 #[cfg(target_os = "macos")]

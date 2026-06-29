@@ -72,6 +72,8 @@ async fn start_host_with(policy: AuthPolicy) -> TestHost {
             clipboard_in: clipboard_in_tx,
             auth: auth.clone(),
             auth_policy: policy,
+            bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            bitrate_ceiling_kbps: 4000,
         },
     )
     .await

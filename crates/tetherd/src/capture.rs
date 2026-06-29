@@ -37,6 +37,9 @@ pub trait ScreenCapturer: Send {
 pub trait FrameEncoder: Send {
     fn codec(&self) -> Codec;
     fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes>;
+    /// Update the target bitrate (kbps) at runtime. No-op for codecs without a
+    /// rate control knob (JPEG); overridden by H.264.
+    fn set_bitrate(&mut self, _kbps: u32) {}
 }
 
 impl FrameEncoder for Box<dyn FrameEncoder> {
@@ -45,5 +48,8 @@ impl FrameEncoder for Box<dyn FrameEncoder> {
     }
     fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes> {
         (**self).encode(frame)
+    }
+    fn set_bitrate(&mut self, kbps: u32) {
+        (**self).set_bitrate(kbps)
     }
 }

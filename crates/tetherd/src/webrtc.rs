@@ -12,6 +12,7 @@
 //! — logged in deferred.md.)
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -329,7 +330,7 @@ async fn answer_offer(
                 debug!(label = %dc.label(), "data channel announced");
                 match dc.label() {
                     "tether-ctl" => wire_ctl_channel(dc, state, pc_for_dc.clone()),
-                    "tether-media" => wire_media_channel(dc, state.frames.clone()),
+                    "tether-media" => wire_media_channel(dc, state.clone()),
                     "tether-bulk" => wire_bulk_channel(dc, state),
                     other => debug!(label = %other, "ignoring unexpected data channel"),
                 }
@@ -542,8 +543,9 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
 
 /// Media channel: pump encoded frames out as chunks, latest-wins under
 /// backpressure (skip frames while the SCTP buffer is deep).
-fn wire_media_channel(dc: Arc<RTCDataChannel>, frames: watch::Receiver<Option<EncodedFrame>>) {
+fn wire_media_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
     const MAX_BUFFERED: usize = 1_000_000;
+    const BITRATE_FLOOR_KBPS: u32 = 600;
 
     let opened = Arc::new(tokio::sync::Notify::new());
     {
@@ -554,9 +556,34 @@ fn wire_media_channel(dc: Arc<RTCDataChannel>, frames: watch::Receiver<Option<En
         }));
     }
 
+    // Adaptive-bitrate loop: sample the send buffer and steer the shared
+    // encoder bitrate via AIMD. Only meaningful for H.264 (JPEG ignores
+    // set_bitrate); harmless either way.
+    {
+        let dc = dc.clone();
+        let bitrate = state.bitrate.clone();
+        let mut controller =
+            crate::adaptive::BitrateController::new(state.bitrate_ceiling_kbps, BITRATE_FLOOR_KBPS);
+        tokio::spawn(async move {
+            let mut tick =
+                tokio::time::interval(std::time::Duration::from_millis(crate::adaptive::SAMPLE_INTERVAL_MS));
+            loop {
+                tick.tick().await;
+                // stop when the channel closes
+                use webrtc::data_channel::data_channel_state::RTCDataChannelState;
+                if dc.ready_state() == RTCDataChannelState::Closed {
+                    return;
+                }
+                let buffered = dc.buffered_amount().await;
+                let target = controller.sample(buffered);
+                bitrate.store(target, Ordering::Relaxed);
+            }
+        });
+    }
+
     tokio::spawn(async move {
         opened.notified().await;
-        let mut frames = frames;
+        let mut frames = state.frames.clone();
         frames.mark_changed(); // a mid-stream joiner gets the current frame
         while frames.changed().await.is_ok() {
             let Some(frame) = frames.borrow_and_update().clone() else { continue };

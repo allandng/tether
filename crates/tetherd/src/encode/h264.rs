@@ -167,6 +167,23 @@ impl FrameEncoder for VtH264Encoder {
         Codec::H264
     }
 
+    /// Retune the live session's average bitrate (adaptive bitrate). Applies on
+    /// subsequent frames; safe between `encode` calls on the capture thread.
+    fn set_bitrate(&mut self, kbps: u32) {
+        let bps = (kbps as i32).saturating_mul(1000);
+        if bps == self.bitrate_bps {
+            return;
+        }
+        self.bitrate_bps = bps;
+        if let Some(session) = &self.session {
+            let _ = set_property(
+                session,
+                unsafe { kVTCompressionPropertyKey_AverageBitRate },
+                CFNumber::new_i32(bps).as_ref(),
+            );
+        }
+    }
+
     fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes> {
         self.ensure_session(frame.width, frame.height)?;
         let session = self.session.as_ref().expect("ensured");
@@ -402,6 +419,22 @@ mod tests {
         assert!(types.contains(&7), "SPS missing: {types:?}");
         assert!(types.contains(&8), "PPS missing: {types:?}");
         assert!(types.contains(&5), "IDR missing: {types:?}");
+    }
+
+    #[test]
+    fn set_bitrate_on_a_live_session_keeps_producing_valid_access_units() {
+        use crate::capture::FrameEncoder;
+        let mut enc = VtH264Encoder::new(4000).unwrap();
+        enc.encode(&gradient_frame(640, 400, 0)).unwrap(); // create the session
+        // retune the live session down, then up — must not error or corrupt output
+        enc.set_bitrate(800);
+        let a = enc.encode(&gradient_frame(640, 400, 1)).unwrap();
+        enc.set_bitrate(3000);
+        let b = enc.encode(&gradient_frame(640, 400, 2)).unwrap();
+        for au in [&a, &b] {
+            assert_eq!(&au[..4], &START_CODE);
+            assert!(!nal_types(au).is_empty(), "no NAL units after set_bitrate");
+        }
     }
 
     #[test]

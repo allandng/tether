@@ -42,6 +42,11 @@ pub struct ServerState {
     /// Shared device-pairing state (host key, allowlist, active code).
     pub auth: Arc<tokio::sync::Mutex<PairingAuth>>,
     pub auth_policy: AuthPolicy,
+    /// Requested encoder bitrate (kbps); the WebRTC media pump's adaptive loop
+    /// writes it, the encode loop applies it. 0 = codec default.
+    pub bitrate: Arc<std::sync::atomic::AtomicU32>,
+    /// Adaptive-bitrate ceiling (the configured `--bitrate-kbps`).
+    pub bitrate_ceiling_kbps: u32,
 }
 
 pub struct Server {

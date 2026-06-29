@@ -1,6 +1,7 @@
 //! Tether host daemon library. The binary in `main.rs` is a thin wrapper;
 //! everything lives here so integration tests can drive a real server.
 
+pub mod adaptive;
 pub mod auth;
 pub mod capture;
 pub mod clipboard;

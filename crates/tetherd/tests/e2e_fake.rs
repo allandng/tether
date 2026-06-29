@@ -84,6 +84,8 @@ async fn full_pipeline_sustains_gate_framerate() {
             )),
             // gate off: this test exercises the streaming pipeline, not pairing
             auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
+            bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            bitrate_ceiling_kbps: 4000,
         },
     )
     .await
