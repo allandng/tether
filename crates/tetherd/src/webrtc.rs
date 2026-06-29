@@ -294,12 +294,14 @@ async fn answer_offer(
     // The controller creates both channels; wire them up as they arrive.
     {
         let state = state.clone();
+        let pc_for_dc = Arc::clone(&pc);
         pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let state = state.clone();
+            let pc_for_dc = Arc::clone(&pc_for_dc);
             Box::pin(async move {
                 debug!(label = %dc.label(), "data channel announced");
                 match dc.label() {
-                    "tether-ctl" => wire_ctl_channel(dc, state),
+                    "tether-ctl" => wire_ctl_channel(dc, state, pc_for_dc.clone()),
                     "tether-media" => wire_media_channel(dc, state.frames.clone()),
                     "tether-bulk" => wire_bulk_channel(dc, state),
                     other => debug!(label = %other, "ignoring unexpected data channel"),
@@ -315,8 +317,69 @@ async fn answer_offer(
     Ok(pc)
 }
 
-/// Control channel: Hello handshake, Resolution announcements, input events.
-fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
+/// Derive the pairing channel binding from the negotiated DTLS fingerprints,
+/// read from this peer's local + remote SDP. Under an honest connection both
+/// ends compute the same value; a relay that swaps fingerprints to MITM yields
+/// different values on each side, so the channel-bound pairing proof fails.
+async fn dtls_channel_binding(pc: &RTCPeerConnection) -> [u8; 32] {
+    let local = pc.local_description().await.and_then(|d| sdp_fingerprint(&d.sdp));
+    let remote = pc.remote_description().await.and_then(|d| sdp_fingerprint(&d.sdp));
+    match (local, remote) {
+        (Some(l), Some(r)) => crate::auth::channel_binding(&l, &r),
+        // If a fingerprint is somehow missing, fall back to a fixed binding;
+        // pairing still requires the code but loses MITM resistance — logged.
+        _ => {
+            warn!("missing DTLS fingerprint; pairing MITM resistance degraded");
+            crate::auth::channel_binding("tether-no-fp", "tether-no-fp")
+        }
+    }
+}
+
+/// Extract the `a=fingerprint:` value from an SDP (first occurrence).
+fn sdp_fingerprint(sdp: &str) -> Option<String> {
+    sdp.lines()
+        .find_map(|l| l.trim().strip_prefix("a=fingerprint:"))
+        .map(|v| v.to_owned())
+}
+
+/// Run the auth gate over the WebRTC ctl channel. Returns true if authenticated.
+async fn run_auth_gate(
+    dc: &Arc<RTCDataChannel>,
+    in_rx: &mut mpsc::Receiver<Bytes>,
+    state: &ServerState,
+    binding: &[u8; 32],
+) -> bool {
+    loop {
+        let Some(bytes) = in_rx.recv().await else { return false };
+        let msg = match Message::decode(&bytes) {
+            Ok(Decoded::Message { message, .. }) => message,
+            _ => continue,
+        };
+        let (response, decision) = {
+            let mut auth = state.auth.lock().await;
+            crate::session::handle_auth_message(
+                &mut auth,
+                state.auth_policy,
+                &msg,
+                binding,
+                crate::auth::now_unix(),
+            )
+        };
+        if let Some(resp) = response {
+            if dc.send(&resp.encode()).await.is_err() {
+                return false;
+            }
+        }
+        match decision {
+            crate::session::AuthDecision::Proceed => return true,
+            crate::session::AuthDecision::Reject => return false,
+            crate::session::AuthDecision::Continue => {}
+        }
+    }
+}
+
+/// Control channel: Hello handshake, device auth, Resolution, input events.
+fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState, pc: Arc<RTCPeerConnection>) {
     let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(256);
     dc.on_message(Box::new(move |msg| {
         let in_tx = in_tx.clone();
@@ -345,6 +408,15 @@ fn wire_ctl_channel(dc: Arc<RTCDataChannel>, state: ServerState) {
         if dc.send(&host_hello().encode()).await.is_err() {
             return;
         }
+
+        // Device-pairing / token auth gate, bound to the DTLS fingerprints so a
+        // malicious signal relay can't MITM the pairing.
+        let binding = dtls_channel_binding(&pc).await;
+        if !run_auth_gate(&dc, &mut in_rx, &state, &binding).await {
+            let _ = dc.close().await;
+            return;
+        }
+
         let mut resolution = state.resolution.clone();
         let current: Resolution = *resolution.borrow_and_update();
         if dc.send(&Message::Resolution(current).encode()).await.is_err() {

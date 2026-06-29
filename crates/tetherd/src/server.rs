@@ -8,10 +8,21 @@ use tokio::sync::{mpsc, watch};
 use tether_protocol::Resolution;
 use tracing::{info, warn};
 
+use crate::auth::PairingAuth;
 use crate::capture::EncodedFrame;
 use crate::config::{ip_allowed, validate_bind_addr};
 use crate::input::InjectCommand;
 use crate::session;
+
+/// Device-pairing enforcement policy (Phase 5). The gate activates once any
+/// device is paired or `require_pairing` is set, so a host that has admitted a
+/// device can't also be reached over the old unauthenticated path.
+/// `allow_unpaired` is an explicit dev/LAN escape that keeps the gate off.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthPolicy {
+    pub require_pairing: bool,
+    pub allow_unpaired: bool,
+}
 
 /// Everything a session needs, decoupled from where it comes from so tests
 /// can drive sessions with fakes and Module 3/5 can plug in real pipelines.
@@ -28,6 +39,9 @@ pub struct ServerState {
     pub clipboard_out: watch::Receiver<Option<String>>,
     /// Clipboard content from the controller, bound for the host pasteboard.
     pub clipboard_in: std::sync::mpsc::Sender<String>,
+    /// Shared device-pairing state (host key, allowlist, active code).
+    pub auth: Arc<tokio::sync::Mutex<PairingAuth>>,
+    pub auth_policy: AuthPolicy,
 }
 
 pub struct Server {

@@ -22,12 +22,33 @@ async fn main() -> anyhow::Result<()> {
     start_injector(input_rx);
     let clipboard = start_clipboard()?;
 
+    // Device pairing state (host key + allowlist), shared across sessions.
+    let auth_dir = tetherd::auth::PairingAuth::default_dir()?;
+    let mut pairing = tetherd::auth::PairingAuth::load_or_create(&auth_dir)?;
+    if args.pair {
+        let code = pairing.arm(tetherd::auth::now_unix());
+        info!("pairing armed (valid 5 min) — enter this code on the controller:");
+        println!("\n    Pairing code:  {}\n", tetherd::auth::group_code(&code));
+    }
+    if args.allow_unpaired {
+        tracing::warn!("--allow-unpaired: device pairing is NOT enforced (dev/LAN only)");
+    }
+    if !pairing.is_empty() {
+        info!(devices = pairing.paired_devices().len(), "paired devices loaded; auth required");
+    }
+    let auth = std::sync::Arc::new(tokio::sync::Mutex::new(pairing));
+
     let state = ServerState {
         resolution: pipeline.resolution,
         frames: pipeline.frames,
         input_tx,
         clipboard_out: clipboard.outbound,
         clipboard_in: clipboard.inbound_tx,
+        auth,
+        auth_policy: tetherd::server::AuthPolicy {
+            require_pairing: args.require_pairing,
+            allow_unpaired: args.allow_unpaired,
+        },
     };
 
     let lan = match args.bind {

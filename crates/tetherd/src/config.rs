@@ -44,9 +44,24 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = CodecArg::Jpeg)]
     pub codec: CodecArg,
 
-    /// Target bitrate for --codec h264.
+    /// Target bitrate for --codec h264 (also the adaptive-bitrate ceiling).
     #[arg(long, default_value_t = 4000)]
     pub bitrate_kbps: u32,
+
+    /// Arm a one-time pairing code at startup (printed to the terminal) so a
+    /// new controller can pair. Valid 5 minutes.
+    #[arg(long)]
+    pub pair: bool,
+
+    /// Refuse any controller that isn't paired, even before the first device is
+    /// paired. (The gate auto-activates once any device is paired regardless.)
+    #[arg(long)]
+    pub require_pairing: bool,
+
+    /// Escape hatch: keep the unauthenticated path open even after devices are
+    /// paired. Dev/LAN only — defeats pairing; logged loudly.
+    #[arg(long)]
+    pub allow_unpaired: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

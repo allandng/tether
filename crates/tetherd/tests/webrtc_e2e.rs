@@ -18,8 +18,8 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use tether_protocol::{
-    CAP_CAN_CONTROL, ClipboardData, Codec, Decoded, Hello, InputEvent, Message, PROTOCOL_VERSION, TextInput,
-    Resolution, Role,
+    Auth, AuthResult, CAP_CAN_CONTROL, ClipboardData, Codec, Decoded, Hello, InputEvent, Message,
+    PROTOCOL_VERSION, Resolution, Role, TextInput,
 };
 use tether_signal::protocol::{Caps, ClientMessage, ServerMessage};
 use tetherd::capture::{EncodedFrame, RawFrame, ScreenCapturer};
@@ -89,6 +89,14 @@ async fn webrtc_end_to_end_frames_and_input() {
         input_tx,
         clipboard_out: clipboard_out_rx,
         clipboard_in: clipboard_in_tx,
+        auth: std::sync::Arc::new(tokio::sync::Mutex::new(
+            tetherd::auth::PairingAuth::load_or_create(
+                &std::env::temp_dir().join(format!("tether-wrtc-auth-{}", std::process::id())),
+            )
+            .expect("auth"),
+        )),
+        // gate off: this test exercises the data-channel transport, not pairing
+        auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
     };
     tokio::spawn(run_host(
         RtcConfig {
@@ -230,7 +238,7 @@ async fn webrtc_end_to_end_frames_and_input() {
 
     let deadline = Duration::from_secs(15);
 
-    // --- handshake over ctl: host Hello, then Resolution
+    // --- handshake over ctl: host Hello, then auth, then Resolution
     let first = tokio::time::timeout(deadline, ctl_rx.recv())
         .await
         .expect("timed out waiting for host hello")
@@ -239,6 +247,16 @@ async fn webrtc_end_to_end_frames_and_input() {
         panic!("expected host Hello");
     };
     assert_eq!(h.role, Role::Host);
+
+    // auth gate is off (allow_unpaired); send Auth and expect AuthResult{ok}
+    ctl.send(&Message::Auth(Auth { device_id: "ipad".into(), token: String::new() }).encode())
+        .await
+        .unwrap();
+    let ar = tokio::time::timeout(deadline, ctl_rx.recv()).await.unwrap().unwrap();
+    assert!(matches!(
+        Message::decode(&ar),
+        Ok(Decoded::Message { message: Message::AuthResult(AuthResult { ok: true }), .. })
+    ));
 
     let second = tokio::time::timeout(deadline, ctl_rx.recv()).await.unwrap().unwrap();
     let Ok(Decoded::Message { message: Message::Resolution(r), .. }) = Message::decode(&second)

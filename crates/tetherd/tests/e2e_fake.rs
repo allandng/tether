@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
-    CAP_CAN_CONTROL, Codec, Decoded, Hello, Message, PROTOCOL_VERSION, Resolution, Role,
+    Auth, CAP_CAN_CONTROL, Codec, Decoded, Hello, Message, PROTOCOL_VERSION, Resolution, Role,
 };
 use tetherd::capture::{RawFrame, ScreenCapturer};
 use tetherd::encode::JpegEncoder;
@@ -75,6 +75,15 @@ async fn full_pipeline_sustains_gate_framerate() {
             input_tx,
             clipboard_out: clipboard_out_rx,
             clipboard_in: clipboard_in_tx,
+            auth: std::sync::Arc::new(tokio::sync::Mutex::new(
+                tetherd::auth::PairingAuth::load_or_create(&std::env::temp_dir().join(format!(
+                    "tether-e2e-auth-{}",
+                    std::process::id()
+                )))
+                .expect("auth"),
+            )),
+            // gate off: this test exercises the streaming pipeline, not pairing
+            auth_policy: tetherd::server::AuthPolicy { require_pairing: false, allow_unpaired: true },
         },
     )
     .await
@@ -94,6 +103,12 @@ async fn full_pipeline_sustains_gate_framerate() {
             capabilities: CAP_CAN_CONTROL,
         })
         .encode(),
+    ))
+    .await
+    .unwrap();
+    // auth gate is off (allow_unpaired) but the controller still sends Auth
+    ws.send(WsMessage::Binary(
+        Message::Auth(Auth { device_id: "e2e".into(), token: String::new() }).encode(),
     ))
     .await
     .unwrap();
@@ -119,6 +134,7 @@ async fn full_pipeline_sustains_gate_framerate() {
             }
             Decoded::Message { message: Message::Resolution(r), .. } => resolution = Some(r),
             Decoded::Message { message: Message::Hello(_), .. } => {}
+            Decoded::Message { message: Message::AuthResult(_), .. } => {}
             other => panic!("unexpected: {other:?}"),
         }
     }

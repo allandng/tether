@@ -8,13 +8,14 @@ use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tether_protocol::{
-    CAP_CAN_CONTROL, CAP_CAN_HOST, ClipboardData, Decoded, FrameData, Hello, Message,
-    PROTOCOL_VERSION, Role,
+    CAP_CAN_CONTROL, CAP_CAN_HOST, AuthResult, ClipboardData, Decoded, FrameData, Hello, Message,
+    PROTOCOL_VERSION, PairResult, Role,
 };
 use tracing::{debug, info, warn};
 
+use crate::auth::{PairOutcome, PairingAuth};
 use crate::input::InjectCommand;
-use crate::server::ServerState;
+use crate::server::{AuthPolicy, ServerState};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -36,6 +37,12 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
             let _ = ws.close(None).await;
             return Err(e);
         }
+    }
+
+    // Device-pairing / token auth gate (direct LAN link → constant binding).
+    if let Err(e) = auth_gate(&mut ws, &state).await {
+        let _ = ws.close(None).await;
+        return Err(e);
     }
 
     let mut frames = state.frames.clone();
@@ -149,6 +156,79 @@ pub fn host_hello() -> Message {
     })
 }
 
+/// What the transport should do after feeding one auth-phase message through
+/// [`handle_auth_message`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuthDecision {
+    /// Authenticated — start streaming.
+    Proceed,
+    /// Refuse and close the session.
+    Reject,
+    /// Inconclusive (e.g. token rejected) — keep reading auth messages so the
+    /// controller can try pairing.
+    Continue,
+}
+
+/// Transport-agnostic auth gate, run after the Hello exchange on both the WS
+/// and WebRTC control channels. The controller always sends `Auth` first
+/// (token may be empty); on rejection it may follow with `PairRequest`.
+///
+/// `channel_binding` is the DTLS-fingerprint hash for WebRTC (defeats a relay
+/// MITM) or a fixed constant for the direct LAN WebSocket. Returns the response
+/// to send back and the decision.
+pub fn handle_auth_message(
+    auth: &mut PairingAuth,
+    policy: AuthPolicy,
+    msg: &Message,
+    channel_binding: &[u8; 32],
+    now_unix: u64,
+) -> (Option<Message>, AuthDecision) {
+    // The gate is active once a device is paired or pairing is required, unless
+    // explicitly overridden for dev/LAN.
+    let gate_active = !policy.allow_unpaired && (policy.require_pairing || !auth.is_empty());
+
+    match msg {
+        Message::Auth(a) => {
+            let ok = !gate_active || auth.verify_token(&a.device_id, &a.token);
+            if ok {
+                (Some(Message::AuthResult(AuthResult { ok: true })), AuthDecision::Proceed)
+            } else {
+                // token no good; let the controller attempt pairing next
+                (Some(Message::AuthResult(AuthResult { ok: false })), AuthDecision::Continue)
+            }
+        }
+        Message::PairRequest(p) => {
+            match auth.verify_pairing(&p.device_id, &p.name, &p.proof, channel_binding, now_unix) {
+                Ok(PairOutcome::Paired { token }) => (
+                    Some(Message::PairResult(PairResult { ok: true, token })),
+                    AuthDecision::Proceed,
+                ),
+                Ok(_) => (
+                    Some(Message::PairResult(PairResult { ok: false, token: String::new() })),
+                    AuthDecision::Reject,
+                ),
+                Err(e) => {
+                    warn!(error = %e, "pairing verification error");
+                    (
+                        Some(Message::PairResult(PairResult { ok: false, token: String::new() })),
+                        AuthDecision::Reject,
+                    )
+                }
+            }
+        }
+        other => {
+            warn!(?other, "unexpected message during auth");
+            (None, AuthDecision::Reject)
+        }
+    }
+}
+
+/// Channel binding for the direct LAN WebSocket transport (no relay → no MITM
+/// vector, so a fixed constant both ends agree on). Mirrored in the controller.
+pub fn ws_channel_binding() -> [u8; 32] {
+    crate::auth::channel_binding("tether-lan-direct", "tether-lan-direct")
+}
+
 async fn handshake(ws: &mut Ws) -> anyhow::Result<Hello> {
     let hello = timeout(HANDSHAKE_TIMEOUT, read_hello(ws))
         .await
@@ -156,6 +236,45 @@ async fn handshake(ws: &mut Ws) -> anyhow::Result<Hello> {
     validate_controller_hello(&hello).map_err(anyhow::Error::msg)?;
     send(ws, &host_hello()).await?;
     Ok(hello)
+}
+
+/// Run the auth gate over the WS control channel. Reads Auth/PairRequest
+/// messages and applies the shared decision logic until the session is
+/// authenticated or refused.
+async fn auth_gate(ws: &mut Ws, state: &ServerState) -> anyhow::Result<()> {
+    let binding = ws_channel_binding();
+    loop {
+        let msg = timeout(HANDSHAKE_TIMEOUT, read_message(ws))
+            .await
+            .context("auth timed out")??;
+        let (response, decision) = {
+            let mut auth = state.auth.lock().await;
+            handle_auth_message(&mut auth, state.auth_policy, &msg, &binding, crate::auth::now_unix())
+        };
+        if let Some(resp) = response {
+            send(ws, &resp).await?;
+        }
+        match decision {
+            AuthDecision::Proceed => return Ok(()),
+            AuthDecision::Reject => bail!("controller failed authentication"),
+            AuthDecision::Continue => {}
+        }
+    }
+}
+
+async fn read_message(ws: &mut Ws) -> anyhow::Result<Message> {
+    loop {
+        match ws.next().await {
+            None | Some(Ok(WsMessage::Close(_))) => bail!("peer closed during auth"),
+            Some(Ok(WsMessage::Binary(bytes))) => match Message::decode(&bytes)? {
+                Decoded::Message { message, .. } => return Ok(message),
+                Decoded::Unknown { .. } => {} // skip unknown types
+                Decoded::NeedMoreData => bail!("truncated message"),
+            },
+            Some(Ok(_)) => {} // control frames
+            Some(Err(e)) => return Err(e.into()),
+        }
+    }
 }
 
 async fn read_hello(ws: &mut Ws) -> anyhow::Result<Hello> {

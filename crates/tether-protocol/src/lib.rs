@@ -34,6 +34,10 @@ pub const MAX_CLIPBOARD_LEN: usize = 256 * 1024;
 /// but bound it so a runaway paste can't masquerade as typed text.
 pub const MAX_TEXT_INPUT_LEN: usize = 1024;
 
+/// Bound on each variable-length field in the pairing/auth messages
+/// (device ids, names, tokens, proofs are all short).
+pub const MAX_AUTH_FIELD_LEN: usize = 512;
+
 mod msg_type {
     pub const HELLO: u8 = 0x01;
     pub const RESOLUTION: u8 = 0x02;
@@ -41,6 +45,10 @@ mod msg_type {
     pub const INPUT_EVENT: u8 = 0x04;
     pub const CLIPBOARD_DATA: u8 = 0x05;
     pub const TEXT_INPUT: u8 = 0x06;
+    pub const PAIR_REQUEST: u8 = 0x07;
+    pub const PAIR_RESULT: u8 = 0x08;
+    pub const AUTH: u8 = 0x09;
+    pub const AUTH_RESULT: u8 = 0x0A;
 }
 
 /// Capability bit: this peer can be controlled (host path exists).
@@ -175,6 +183,38 @@ pub struct TextInput {
     pub text: String,
 }
 
+/// Controller → host: request to pair using a one-time code. `proof` binds the
+/// code to the DTLS channel — `HMAC-SHA256(code, channel_binding)` — so a
+/// malicious relay that MITMs the connection produces a different binding and
+/// fails to pair. See docs/phase5-plan.md.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairRequest {
+    pub device_id: String,
+    pub name: String,
+    pub proof: Vec<u8>,
+}
+
+/// Host → controller: the pairing outcome and, on success, the long-lived
+/// per-device token to present on future connects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairResult {
+    pub ok: bool,
+    pub token: String,
+}
+
+/// Controller → host: authenticate a connection with a previously issued token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Auth {
+    pub device_id: String,
+    pub token: String,
+}
+
+/// Host → controller: whether the token was accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthResult {
+    pub ok: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Hello(Hello),
@@ -183,6 +223,10 @@ pub enum Message {
     InputEvent(InputEvent),
     ClipboardData(ClipboardData),
     TextInput(TextInput),
+    PairRequest(PairRequest),
+    PairResult(PairResult),
+    Auth(Auth),
+    AuthResult(AuthResult),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -251,6 +295,26 @@ impl Message {
                 buf.put_u8(msg_type::TEXT_INPUT);
                 buf.put_slice(t.text.as_bytes());
             }
+            Message::PairRequest(p) => {
+                buf.put_u8(msg_type::PAIR_REQUEST);
+                put_field(&mut buf, p.device_id.as_bytes());
+                put_field(&mut buf, p.name.as_bytes());
+                put_field(&mut buf, &p.proof);
+            }
+            Message::PairResult(p) => {
+                buf.put_u8(msg_type::PAIR_RESULT);
+                buf.put_u8(p.ok as u8);
+                put_field(&mut buf, p.token.as_bytes());
+            }
+            Message::Auth(a) => {
+                buf.put_u8(msg_type::AUTH);
+                put_field(&mut buf, a.device_id.as_bytes());
+                put_field(&mut buf, a.token.as_bytes());
+            }
+            Message::AuthResult(a) => {
+                buf.put_u8(msg_type::AUTH_RESULT);
+                buf.put_u8(a.ok as u8);
+            }
         }
         let total_len = (buf.len() - 4) as u32;
         buf[0..4].copy_from_slice(&total_len.to_le_bytes());
@@ -289,10 +353,86 @@ impl Message {
             msg_type::INPUT_EVENT => Message::InputEvent(decode_input_event(payload, msg_type)?),
             msg_type::CLIPBOARD_DATA => Message::ClipboardData(decode_clipboard(payload, msg_type)?),
             msg_type::TEXT_INPUT => Message::TextInput(decode_text_input(payload)?),
+            msg_type::PAIR_REQUEST => Message::PairRequest(decode_pair_request(payload, msg_type)?),
+            msg_type::PAIR_RESULT => Message::PairResult(decode_pair_result(payload, msg_type)?),
+            msg_type::AUTH => Message::Auth(decode_auth(payload, msg_type)?),
+            msg_type::AUTH_RESULT => Message::AuthResult(decode_auth_result(payload, msg_type)?),
             other => return Ok(Decoded::Unknown { msg_type: other, consumed }),
         };
         Ok(Decoded::Message { message, consumed })
     }
+}
+
+/// Append a `u16`-length-prefixed field.
+fn put_field(buf: &mut BytesMut, bytes: &[u8]) {
+    debug_assert!(bytes.len() <= MAX_AUTH_FIELD_LEN);
+    buf.put_u16_le(bytes.len() as u16);
+    buf.put_slice(bytes);
+}
+
+/// Read a `u16`-length-prefixed field, advancing `p`.
+fn take_field<'a>(p: &mut &'a [u8], t: u8) -> Result<&'a [u8], DecodeError> {
+    if p.len() < 2 {
+        return Err(DecodeError::BadLength(t));
+    }
+    let len = u16::from_le_bytes([p[0], p[1]]) as usize;
+    if len > MAX_AUTH_FIELD_LEN {
+        return Err(DecodeError::InvalidValue("auth field too large"));
+    }
+    if p.len() < 2 + len {
+        return Err(DecodeError::BadLength(t));
+    }
+    let field = &p[2..2 + len];
+    *p = &p[2 + len..];
+    Ok(field)
+}
+
+fn take_str(p: &mut &[u8], t: u8) -> Result<String, DecodeError> {
+    let field = take_field(p, t)?;
+    Ok(std::str::from_utf8(field)
+        .map_err(|_| DecodeError::InvalidValue("auth field not UTF-8"))?
+        .to_owned())
+}
+
+fn decode_pair_request(p: &[u8], t: u8) -> Result<PairRequest, DecodeError> {
+    let mut p = p;
+    let device_id = take_str(&mut p, t)?;
+    let name = take_str(&mut p, t)?;
+    let proof = take_field(&mut p, t)?.to_vec();
+    if !p.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(PairRequest { device_id, name, proof })
+}
+
+fn decode_pair_result(p: &[u8], t: u8) -> Result<PairResult, DecodeError> {
+    if p.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    let ok = p[0] != 0;
+    let mut rest = &p[1..];
+    let token = take_str(&mut rest, t)?;
+    if !rest.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(PairResult { ok, token })
+}
+
+fn decode_auth(p: &[u8], t: u8) -> Result<Auth, DecodeError> {
+    let mut p = p;
+    let device_id = take_str(&mut p, t)?;
+    let token = take_str(&mut p, t)?;
+    if !p.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(Auth { device_id, token })
+}
+
+fn decode_auth_result(p: &[u8], t: u8) -> Result<AuthResult, DecodeError> {
+    if p.len() != 1 {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(AuthResult { ok: p[0] != 0 })
 }
 
 fn encode_input_event(buf: &mut BytesMut, ev: &InputEvent) {
@@ -528,6 +668,16 @@ mod tests {
             Message::TextInput(TextInput { text: "a".into() }),
             Message::TextInput(TextInput { text: "señor 🎯".into() }),
             Message::TextInput(TextInput { text: String::new() }),
+            Message::PairRequest(PairRequest {
+                device_id: "a1b2c3".into(),
+                name: "iPad".into(),
+                proof: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            }),
+            Message::PairResult(PairResult { ok: true, token: "tok123".into() }),
+            Message::PairResult(PairResult { ok: false, token: String::new() }),
+            Message::Auth(Auth { device_id: "a1b2c3".into(), token: "tok123".into() }),
+            Message::AuthResult(AuthResult { ok: true }),
+            Message::AuthResult(AuthResult { ok: false }),
         ]
     }
 
@@ -673,6 +823,16 @@ mod tests {
 
         let text = Message::TextInput(TextInput { text: "hi".into() });
         assert_eq!(&text.encode()[..], &[3, 0, 0, 0, 0x06, 0x68, 0x69]);
+
+        // Auth { device_id: "hi", token: "ok" }: type + (u16 len + "hi") + (u16 len + "ok")
+        let auth = Message::Auth(Auth { device_id: "hi".into(), token: "ok".into() });
+        assert_eq!(
+            &auth.encode()[..],
+            &[9, 0, 0, 0, 0x09, 2, 0, 0x68, 0x69, 2, 0, 0x6F, 0x6B]
+        );
+
+        let auth_result = Message::AuthResult(AuthResult { ok: true });
+        assert_eq!(&auth_result.encode()[..], &[2, 0, 0, 0, 0x0A, 1]);
     }
 
     #[test]
