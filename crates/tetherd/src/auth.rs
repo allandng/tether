@@ -28,6 +28,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tracing::warn;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -155,13 +156,25 @@ impl PairingAuth {
         if !ok {
             self.fail_count += 1;
             if self.fail_count >= LOCKOUT_THRESHOLD {
-                // Escalating cooldown: LOCKOUT_SECS << (lockout_count), capped,
-                // so repeated throttled grinding backs off exponentially. Only
-                // a successful pairing clears the escalation.
-                let shift = self.lockout_count.min(10);
-                self.locked_until = now_unix + LOCKOUT_SECS.saturating_mul(1u64 << shift);
+                // Escalating cooldown so repeated grinding backs off, but capped
+                // at LOCKOUT_SECS << 3 (~8 min). The code already expires in
+                // CODE_TTL (5 min) and only 3 guesses are allowed per lockout, so
+                // a 40-bit code is unbruteable without a longer cap — and a long
+                // cap would only hand a secret-holding peer a way to freeze a
+                // legitimate pairing window for hours. Cleared on success.
+                let shift = self.lockout_count.min(3);
+                let lock_secs = LOCKOUT_SECS.saturating_mul(1u64 << shift);
+                self.locked_until = now_unix + lock_secs;
                 self.lockout_count += 1;
                 self.fail_count = 0;
+                // Loud so an operator pairing a real device sees interference
+                // rather than a mystifying silent refusal.
+                warn!(
+                    lock_secs,
+                    "pairing locked after repeated bad proofs — if you're trying \
+                     to pair a device, someone with the signal secret may be \
+                     interfering; re-arm a code and retry after the cooldown"
+                );
             }
             return Ok(PairOutcome::Rejected);
         }
@@ -498,6 +511,32 @@ mod tests {
                 .unwrap(),
             PairOutcome::Paired { .. }
         ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lockout_escalation_is_capped_not_hours() {
+        // A secret-holding peer shouldn't be able to escalate the pairing lockout
+        // to hours and freeze a legitimate pairing window. The cooldown must cap
+        // at LOCKOUT_SECS << 3 (~8 min), comfortably above the 5-min code TTL but
+        // far short of the old 17-hour ceiling.
+        let dir = tmpdir("lockcap");
+        let mut a = fresh(&dir);
+        let mut t = 1000u64;
+        let mut max_cooldown = 0u64;
+        for _ in 0..6 {
+            for _ in 0..LOCKOUT_THRESHOLD {
+                a.arm(t);
+                let _ = a.verify_pairing("dev", "x", &[0u8; 32], &CHAN, t).unwrap();
+            }
+            max_cooldown = max_cooldown.max(a.locked_until - t);
+            t = a.locked_until + 1; // wait out this round's cooldown
+        }
+        assert_eq!(
+            max_cooldown,
+            LOCKOUT_SECS * 8,
+            "escalation must reach but not exceed the cap"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

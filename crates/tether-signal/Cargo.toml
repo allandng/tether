@@ -14,7 +14,8 @@ hmac = "0.12"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha1 = "0.10"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal"] }
+subtle = "2.6"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

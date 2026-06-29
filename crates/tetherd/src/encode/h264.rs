@@ -195,66 +195,78 @@ impl FrameEncoder for VtH264Encoder {
     }
 
     fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes> {
-        self.ensure_session(frame.width, frame.height)?;
-        let session = self.session.as_ref().expect("ensured");
+        let result: anyhow::Result<Bytes> = (|| {
+            self.ensure_session(frame.width, frame.height)?;
+            let session = self.session.as_ref().expect("ensured");
 
-        // Wrap the BGRA bytes without copying. No release callback: the
-        // bytes are only borrowed, which is sound because complete_frames()
-        // below forces the encoder to finish with this buffer before we
-        // return (and `frame` outlives this call).
-        let mut pixel_buffer: *mut CVPixelBuffer = ptr::null_mut();
-        // SAFETY: base address points at frame.bgra which is valid and large
-        // enough (bytes_per_row * height); out-pointer is a live stack slot.
-        let cv = unsafe {
-            CVPixelBufferCreateWithBytes(
-                None,
-                frame.width as usize,
-                frame.height as usize,
-                kCVPixelFormatType_32BGRA,
-                NonNull::new(frame.bgra.as_ptr() as *mut c_void).context("null frame data")?,
-                frame.bytes_per_row,
-                None,
-                ptr::null_mut(),
-                None,
-                NonNull::new(&mut pixel_buffer).expect("stack ptr"),
-            )
-        };
-        if cv != 0 || pixel_buffer.is_null() {
-            bail!("CVPixelBufferCreateWithBytes failed: {cv}");
-        }
-        // SAFETY: create-rule ownership of the new pixel buffer.
-        let pixel_buffer = unsafe { CFRetained::from_raw(NonNull::new_unchecked(pixel_buffer)) };
+            // Wrap the BGRA bytes without copying. No release callback: the
+            // bytes are only borrowed, which is sound because complete_frames()
+            // below forces the encoder to finish with this buffer before we
+            // return (and `frame` outlives this call).
+            let mut pixel_buffer: *mut CVPixelBuffer = ptr::null_mut();
+            // SAFETY: base address points at frame.bgra which is valid and large
+            // enough (bytes_per_row * height); out-pointer is a live stack slot.
+            let cv = unsafe {
+                CVPixelBufferCreateWithBytes(
+                    None,
+                    frame.width as usize,
+                    frame.height as usize,
+                    kCVPixelFormatType_32BGRA,
+                    NonNull::new(frame.bgra.as_ptr() as *mut c_void).context("null frame data")?,
+                    frame.bytes_per_row,
+                    None,
+                    ptr::null_mut(),
+                    None,
+                    NonNull::new(&mut pixel_buffer).expect("stack ptr"),
+                )
+            };
+            if cv != 0 || pixel_buffer.is_null() {
+                bail!("CVPixelBufferCreateWithBytes failed: {cv}");
+            }
+            // SAFETY: create-rule ownership of the new pixel buffer.
+            let pixel_buffer =
+                unsafe { CFRetained::from_raw(NonNull::new_unchecked(pixel_buffer)) };
 
-        // SAFETY: 90kHz timescale pts; the pixel buffer and session are live.
-        let pts = unsafe { CMTime::new(self.frame_index * (90_000 / FPS as i64), 90_000) };
-        self.frame_index += 1;
-        let status = unsafe {
-            session.encode_frame(
-                &pixel_buffer,
-                pts,
-                cm_time_invalid(), // duration unknown
-                None,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
-        if status != 0 {
-            bail!("VTCompressionSessionEncodeFrame failed: {status}");
-        }
-        // Force the callback before returning — both for latency and for the
-        // soundness of the borrowed pixel bytes above.
-        // kCMTimeInvalid means "complete everything pending".
-        let status = unsafe { session.complete_frames(cm_time_invalid()) };
-        if status != 0 {
-            bail!("VTCompressionSessionCompleteFrames failed: {status}");
-        }
+            // SAFETY: 90kHz timescale pts; the pixel buffer and session are live.
+            let pts = unsafe { CMTime::new(self.frame_index * (90_000 / FPS as i64), 90_000) };
+            self.frame_index += 1;
+            let status = unsafe {
+                session.encode_frame(
+                    &pixel_buffer,
+                    pts,
+                    cm_time_invalid(), // duration unknown
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if status != 0 {
+                bail!("VTCompressionSessionEncodeFrame failed: {status}");
+            }
+            // Force the callback before returning — both for latency and for the
+            // soundness of the borrowed pixel bytes above.
+            // kCMTimeInvalid means "complete everything pending".
+            let status = unsafe { session.complete_frames(cm_time_invalid()) };
+            if status != 0 {
+                bail!("VTCompressionSessionCompleteFrames failed: {status}");
+            }
 
-        let au = self
-            .rx
-            .recv_timeout(Duration::from_secs(2))
-            .context("VT output callback never fired")?
-            .map_err(|e| anyhow!("VT encode failed: {e}"))?;
-        Ok(Bytes::from(au.annex_b))
+            let au = self
+                .rx
+                .recv_timeout(Duration::from_secs(2))
+                .context("VT output callback never fired")?
+                .map_err(|e| anyhow!("VT encode failed: {e}"))?;
+            Ok(Bytes::from(au.annex_b))
+        })();
+        if let Err(e) = &result {
+            // A stalled/failed VT cycle can wedge the session, and a late output
+            // callback can drop a stale access unit into the channel, desyncing
+            // every later frame. Rebuild on the next frame and clear stale output.
+            warn!(error = %e, "h264 encode failed; rebuilding VT session next frame");
+            self.session = None;
+            while self.rx.try_recv().is_ok() {}
+        }
+        result
     }
 }
 

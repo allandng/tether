@@ -2,8 +2,32 @@ use clap::Parser;
 use tetherd::config::Args;
 use tetherd::input::InjectCommand;
 use tetherd::server::{Server, ServerState};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::info;
+
+/// Resolve when the process is asked to stop — Ctrl-C (SIGINT) or, so a service
+/// manager (launchd `launchctl stop`, systemd) gets a graceful stop, SIGTERM.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let rtc = match args.signal_url() {
         Some(signal_url) => {
             let device_id = args
@@ -85,7 +110,11 @@ async fn main() -> anyhow::Result<()> {
                 device_id,
                 stun: args.stun.clone(),
             };
-            Some(tokio::spawn(tetherd::webrtc::run_host(config, state)))
+            Some(tokio::spawn(tetherd::webrtc::run_host(
+                config,
+                state,
+                shutdown_rx,
+            )))
         }
         None => None,
     };
@@ -101,8 +130,13 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::select! {
         result = transports => result,
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             info!("shutting down");
+            // Ask the WebRTC host to close active peer connections so controllers
+            // see a prompt disconnect instead of waiting out an ICE timeout, then
+            // give it a brief moment before the process exits.
+            let _ = shutdown_tx.send(true);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             Ok(())
         }
     }

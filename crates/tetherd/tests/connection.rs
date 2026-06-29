@@ -457,7 +457,7 @@ async fn second_concurrent_connection_is_rejected() {
 
 #[tokio::test]
 async fn select_display_routes_to_capture() {
-    let mut host = start_host().await;
+    let host = start_host().await;
     let mut ws = connect(host.addr).await;
     handshake(&mut ws).await;
 

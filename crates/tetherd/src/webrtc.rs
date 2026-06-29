@@ -47,6 +47,13 @@ use crate::session::{host_hello, validate_controller_hello};
 pub const CHUNK_PAYLOAD: usize = 16 * 1024 - 8;
 const CHUNK_HEADER: usize = 8;
 
+/// Whole-phase deadline for a peer to authenticate after acquiring a controller
+/// permit. Generous because first-time pairing waits on a human typing a code,
+/// but bounded so a peer that knows the signal secret can't grab the (default
+/// single) controller slot and then never authenticate — without this it would
+/// hold the slot until ICE/DTLS times out on its own, denying real controllers.
+const AUTH_PHASE_TIMEOUT: Duration = Duration::from_secs(90);
+
 pub fn chunk_frame(frame_seq: u32, wire: &[u8]) -> Vec<Bytes> {
     let count = wire.len().div_ceil(CHUNK_PAYLOAD).max(1);
     let mut chunks = Vec::with_capacity(count);
@@ -130,22 +137,34 @@ pub struct RtcConfig {
     pub stun: Vec<String>,
 }
 
-/// Register as a host and serve WebRTC sessions until the process exits.
-/// Reconnects to the signal server with backoff; never returns under normal
-/// operation.
-pub async fn run_host(config: RtcConfig, state: ServerState) -> anyhow::Result<()> {
+/// Register as a host and serve WebRTC sessions until shutdown is signalled.
+/// Reconnects to the signal server with backoff.
+pub async fn run_host(
+    config: RtcConfig,
+    state: ServerState,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let mut backoff = Duration::from_secs(1);
     loop {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
         let started = tokio::time::Instant::now();
-        match signal_session(&config, &state).await {
+        match signal_session(&config, &state, &mut shutdown).await {
             Ok(()) => info!("signal connection closed, reconnecting"),
             Err(e) => warn!(error = %e, "signal connection failed"),
+        }
+        if *shutdown.borrow() {
+            return Ok(());
         }
         // A session that survived a while means the server was healthy.
         if started.elapsed() > Duration::from_secs(10) {
             backoff = Duration::from_secs(1);
         }
-        tokio::time::sleep(backoff).await;
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = shutdown.changed() => return Ok(()),
+        }
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
@@ -160,7 +179,11 @@ struct ActivePeer {
     shutdown_tx: watch::Sender<bool>,
 }
 
-async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Result<()> {
+async fn signal_session(
+    config: &RtcConfig,
+    state: &ServerState,
+    shutdown: &mut watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(&config.signal_url)
         .await
         .context("connecting to signal server")?;
@@ -195,7 +218,18 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
     let ice_servers: Arc<Mutex<Vec<RTCIceServer>>> = Arc::new(Mutex::new(to_rtc_ice(&[], config)));
 
     let result = async {
-        while let Some(msg) = ws_stream.next().await {
+        loop {
+            let msg = tokio::select! {
+                m = ws_stream.next() => m,
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        info!("shutdown signalled, closing webrtc session");
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+            let Some(msg) = msg else { break };
             let msg = msg.context("signal stream error")?;
             let WsMessage::Text(text) = msg else {
                 if matches!(msg, WsMessage::Close(_)) {
@@ -512,9 +546,22 @@ fn wire_ctl_channel(
         };
 
         // Device-pairing / token auth gate, bound to the DTLS fingerprints so a
-        // malicious signal relay can't MITM the pairing.
+        // malicious signal relay can't MITM the pairing. Bounded by a deadline
+        // so an unauthenticating peer can't hold the controller slot forever.
         let binding = dtls_channel_binding(&pc).await;
-        if !run_auth_gate(&dc, &mut in_rx, &state, &binding).await {
+        let authed = match tokio::time::timeout(
+            AUTH_PHASE_TIMEOUT,
+            run_auth_gate(&dc, &mut in_rx, &state, &binding),
+        )
+        .await
+        {
+            Ok(ok) => ok,
+            Err(_) => {
+                warn!("webrtc controller did not authenticate within the deadline");
+                false
+            }
+        };
+        if !authed {
             // Tear down the ENTIRE peer connection, not just ctl — otherwise the
             // already-open media/bulk channels would keep their pumps alive.
             let _ = pc.close().await;

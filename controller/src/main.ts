@@ -57,15 +57,28 @@ function setup(): void {
   const canvas = $<HTMLCanvasElement>("#view");
 
   const viewer = new Viewer(canvas);
+  const RECONNECT_BASE_MS = 1000;
+  const RECONNECT_MAX_MS = 30_000;
   let status = "closed";
   let wantConnection = false; // user intent: reconnect on unexpected drops
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectDelay = RECONNECT_BASE_MS; // grows on repeated failure, resets on connect
   let active: Transport | null = null;
 
   const events: ConnectionEvents = {
-    onStatus(s, detail) {
+    onStatus(s, detail, fatal) {
       status = s;
       dot.className = s;
+      // A fatal close (wrong secret, bad target, protocol mismatch) won't fix
+      // itself — stop the auto-reconnect loop and leave the reason on screen.
+      if (s === "closed" && fatal) {
+        wantConnection = false;
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+      }
+      if (s === "connected") reconnectDelay = RECONNECT_BASE_MS; // reset backoff
       connectBtn.textContent = wantConnection ? "Disconnect" : "Connect";
       stats.textContent = detail ?? "";
       // touch-only affordances appear once connected on a touch device
@@ -82,11 +95,15 @@ function setup(): void {
         canvas.focus();
       }
       if (s === "closed" && wantConnection && !reconnectTimer) {
-        stats.textContent = detail ?? "reconnecting…";
+        // Exponential backoff with jitter so a persistently-down host isn't
+        // hammered once a second (and the reason stays visible).
+        const wait = Math.round(reconnectDelay * (0.7 + Math.random() * 0.6));
+        reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+        stats.textContent = `${detail ?? "disconnected"} — retrying in ${Math.round(wait / 1000)}s`;
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           if (wantConnection) startTransport();
-        }, 1000);
+        }, wait);
       }
     },
     onResolution(r) {
@@ -267,6 +284,7 @@ function setup(): void {
       localStorage.setItem("tether-target", targetInput.value.trim());
       localStorage.setItem("tether-mode", modeSelect.value);
       wantConnection = true;
+      reconnectDelay = RECONNECT_BASE_MS; // fresh user-initiated connect
       startTransport();
     } else {
       wantConnection = false;

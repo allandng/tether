@@ -2539,6 +2539,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "subtle",
  "tokio",
  "tokio-tungstenite",
  "tracing",

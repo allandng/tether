@@ -74,7 +74,7 @@ export class WebRtcTransport implements Transport {
         onDisplays: (d) => this.events.onDisplays(d),
         onPairingRequired: () => this.events.onPairingRequired(),
         onPairingFailed: () => this.events.onPairingFailed(),
-        onProtocolError: (detail) => this.fail(detail),
+        onProtocolError: (detail) => this.fail(detail, true),
       },
       (bytes) => {
         // our encoders always allocate plain ArrayBuffers; the cast just
@@ -151,7 +151,7 @@ export class WebRtcTransport implements Transport {
         }
       },
       onPeers: () => {},
-      onError: (code, message) => this.fail(`${code}: ${message}`),
+      onError: (code, message) => this.fail(`${message || code}`, FATAL_SIGNAL_CODES.has(code)),
       onClosed: () => {
         // Signaling is only needed for setup; once the ctl channel is open a
         // signaling drop is harmless. Before that, it's fatal.
@@ -229,9 +229,14 @@ export class WebRtcTransport implements Transport {
     }
   }
 
-  private fail(detail: string): void {
+  private fail(detail: string, fatal = false): void {
     if (!this.pc) return; // already closed
     this.close();
-    this.events.onStatus("closed", detail);
+    this.events.onStatus("closed", detail, fatal);
   }
 }
+
+/** Signal-server errors that retrying won't fix: wrong secret, a target that
+ * isn't a valid host, or a protocol-order bug. (`unknown_target` is transient —
+ * the host may just be momentarily offline — so it is NOT fatal.) */
+const FATAL_SIGNAL_CODES = new Set(["bad_auth", "target_not_host", "not_registered"]);

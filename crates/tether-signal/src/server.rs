@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::State;
@@ -8,23 +9,46 @@ use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::any;
 use futures_util::{SinkExt, StreamExt};
+use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::protocol::{Caps, ClientMessage, ErrorCode, PeerInfo, ServerMessage};
+
+/// A socket that never sends a valid `Register` is closed after this — keeps
+/// unauthenticated/idle sockets from accumulating.
+const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hard cap on concurrent connections (a leaked secret shouldn't let one peer
+/// exhaust the relay's sockets/memory).
+const MAX_CONNECTIONS: usize = 1024;
+/// Per-connection inbound message budget per second (generous enough for an ICE
+/// trickle burst; low enough to stop a flood).
+const MAX_MSGS_PER_SEC: u32 = 200;
+/// Bounded outbound queue per connection — a stalled reader can't grow server
+/// memory without limit (messages are dropped once it's this far behind).
+const OUTBOUND_BOUND: usize = 256;
 
 pub struct AppState {
     secret: String,
     ice: crate::turn::IceConfig,
     devices: Mutex<HashMap<String, Device>>,
     conn_counter: AtomicU64,
+    conns: AtomicUsize,
 }
 
 struct Device {
     name: String,
     caps: Caps,
     conn_id: u64,
-    tx: mpsc::UnboundedSender<ServerMessage>,
+    tx: mpsc::Sender<ServerMessage>,
+}
+
+/// Decrements the live-connection count on drop, however `handle_socket` exits.
+struct ConnGuard(Arc<AppState>);
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.conns.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl AppState {
@@ -47,6 +71,7 @@ impl AppState {
             ice,
             devices: Mutex::new(HashMap::new()),
             conn_counter: AtomicU64::new(1),
+            conns: AtomicUsize::new(0),
         })
     }
 }
@@ -62,8 +87,16 @@ async fn ws_upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) ->
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+    // Connection cap (RAII-decremented). Refuse and drop past the limit.
+    state.conns.fetch_add(1, Ordering::Relaxed);
+    let _guard = ConnGuard(Arc::clone(&state));
+    if state.conns.load(Ordering::Relaxed) > MAX_CONNECTIONS {
+        warn!("connection cap reached; refusing socket");
+        return;
+    }
+
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (tx, mut rx) = mpsc::channel::<ServerMessage>(OUTBOUND_BOUND);
 
     // Outbound pump: serialize queued messages; a Replaced error is terminal
     // (a newer connection took this device_id), so close after sending it.
@@ -89,8 +122,38 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     let conn_id = state.conn_counter.fetch_add(1, Ordering::Relaxed);
     let mut registered_id: Option<String> = None;
+    let mut window_start = Instant::now();
+    let mut in_window: u32 = 0;
 
-    while let Some(Ok(msg)) = stream.next().await {
+    loop {
+        // Bound how long an unregistered socket may sit idle. Registered
+        // devices legitimately wait (silently) for offers, so only pre-Register
+        // reads are deadlined.
+        let next = if registered_id.is_none() {
+            match tokio::time::timeout(REGISTER_TIMEOUT, stream.next()).await {
+                Ok(n) => n,
+                Err(_) => {
+                    debug!("closing socket that never registered");
+                    break;
+                }
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(Ok(msg)) = next else { break };
+
+        // Per-connection inbound rate limit: a flood (even past the secret) is
+        // dropped at the door rather than amplified into broadcasts.
+        if window_start.elapsed() >= Duration::from_secs(1) {
+            window_start = Instant::now();
+            in_window = 0;
+        }
+        in_window += 1;
+        if in_window > MAX_MSGS_PER_SEC {
+            warn!("per-connection message rate exceeded; closing socket");
+            break;
+        }
+
         let WsMessage::Text(text) = msg else {
             match msg {
                 WsMessage::Close(_) => break,
@@ -100,7 +163,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         let parsed: ClientMessage = match serde_json::from_str(&text) {
             Ok(m) => m,
             Err(e) => {
-                let _ = tx.send(ServerMessage::Error {
+                let _ = tx.try_send(ServerMessage::Error {
                     code: ErrorCode::BadMessage,
                     message: format!("unparseable message: {e}"),
                 });
@@ -114,9 +177,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 caps,
                 auth,
             } => {
-                if auth != state.secret {
+                // Constant-time compare (consistent with the host's token /
+                // pairing-proof checks) to avoid leaking the secret by timing.
+                if !bool::from(auth.as_bytes().ct_eq(state.secret.as_bytes())) {
                     warn!(%device_id, "registration with bad secret refused");
-                    let _ = tx.send(ServerMessage::Error {
+                    let _ = tx.try_send(ServerMessage::Error {
                         code: ErrorCode::BadAuth,
                         message: "bad secret".into(),
                     });
@@ -133,7 +198,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     },
                 ) {
                     info!(%device_id, "replacing stale registration");
-                    let _ = old.tx.send(ServerMessage::Error {
+                    let _ = old.tx.try_send(ServerMessage::Error {
                         code: ErrorCode::Replaced,
                         message: "a newer connection registered this device id".into(),
                     });
@@ -145,7 +210,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let ice_servers = state.ice.ice_servers_for(&device_id, now);
-                let _ = tx.send(ServerMessage::Registered { ice_servers });
+                let _ = tx.try_send(ServerMessage::Registered { ice_servers });
                 broadcast_peers(&devices);
             }
             ClientMessage::Offer { target, sdp } => {
@@ -161,7 +226,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     .map(|d| d.caps.can_control)
                     .unwrap_or(false)
                 {
-                    let _ = tx.send(ServerMessage::Error {
+                    let _ = tx.try_send(ServerMessage::Error {
                         code: ErrorCode::NotController,
                         message: "this device cannot control".into(),
                     });
@@ -172,14 +237,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         let _ = unknown_target(&tx, &target);
                     }
                     Some(t) if !t.caps.can_host => {
-                        let _ = tx.send(ServerMessage::Error {
+                        let _ = tx.try_send(ServerMessage::Error {
                             code: ErrorCode::TargetNotHost,
                             message: format!("{target} cannot host"),
                         });
                     }
                     Some(t) => {
                         debug!(%from, %target, "relaying offer");
-                        let _ = t.tx.send(ServerMessage::Offer { from, sdp });
+                        let _ = t.tx.try_send(ServerMessage::Offer { from, sdp });
                     }
                 }
             }
@@ -195,7 +260,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     }
                     Some(t) => {
                         debug!(%from, %target, "relaying answer");
-                        let _ = t.tx.send(ServerMessage::Answer { from, sdp });
+                        let _ = t.tx.try_send(ServerMessage::Answer { from, sdp });
                     }
                 }
             }
@@ -206,7 +271,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 };
                 let devices = state.devices.lock().await;
                 if let Some(t) = devices.get(&target) {
-                    let _ = t.tx.send(ServerMessage::Ice { from, candidate });
+                    let _ = t.tx.try_send(ServerMessage::Ice { from, candidate });
                 }
                 // unknown target for trickle ICE: drop silently (candidates
                 // can race a peer's disconnect; erroring is just noise)
@@ -237,26 +302,26 @@ fn broadcast_peers(devices: &HashMap<String, Device>) {
         })
         .collect();
     for device in devices.values() {
-        let _ = device.tx.send(ServerMessage::Peers {
+        let _ = device.tx.try_send(ServerMessage::Peers {
             peers: peers.clone(),
         });
     }
 }
 
 fn not_registered(
-    tx: &mpsc::UnboundedSender<ServerMessage>,
-) -> Result<(), mpsc::error::SendError<ServerMessage>> {
-    tx.send(ServerMessage::Error {
+    tx: &mpsc::Sender<ServerMessage>,
+) -> Result<(), mpsc::error::TrySendError<ServerMessage>> {
+    tx.try_send(ServerMessage::Error {
         code: ErrorCode::NotRegistered,
         message: "register first".into(),
     })
 }
 
 fn unknown_target(
-    tx: &mpsc::UnboundedSender<ServerMessage>,
+    tx: &mpsc::Sender<ServerMessage>,
     target: &str,
-) -> Result<(), mpsc::error::SendError<ServerMessage>> {
-    tx.send(ServerMessage::Error {
+) -> Result<(), mpsc::error::TrySendError<ServerMessage>> {
+    tx.try_send(ServerMessage::Error {
         code: ErrorCode::UnknownTarget,
         message: format!("{target} is not online"),
     })

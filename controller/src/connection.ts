@@ -14,7 +14,9 @@ export interface Identity {
 }
 
 export interface ConnectionEvents {
-  onStatus(status: ConnectionStatus, detail?: string): void;
+  /** `fatal` marks a close that retrying won't fix (wrong secret, protocol
+   * mismatch, bad target) — the UI should stop reconnecting and show `detail`. */
+  onStatus(status: ConnectionStatus, detail?: string, fatal?: boolean): void;
   onResolution(resolution: Resolution): void;
   onFrame(frame: FrameData): void;
   onClipboard(text: string): void;
@@ -53,7 +55,7 @@ export class TetherConnection implements Transport {
     try {
       ws = new WebSocket(`ws://${hostPort}`);
     } catch (e) {
-      this.events.onStatus("closed", `invalid address: ${e}`);
+      this.events.onStatus("closed", `invalid address: ${e}`, true);
       return;
     }
     this.ws = ws;
@@ -76,7 +78,7 @@ export class TetherConnection implements Transport {
         onDisplays: (d) => this.events.onDisplays(d),
         onPairingRequired: () => this.events.onPairingRequired(),
         onPairingFailed: () => this.events.onPairingFailed(),
-        onProtocolError: (detail) => this.fail(detail),
+        onProtocolError: (detail) => this.fail(detail, true),
       },
       (bytes) => {
         if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(bytes);
@@ -131,8 +133,8 @@ export class TetherConnection implements Transport {
     }
   }
 
-  private fail(detail: string): void {
+  private fail(detail: string, fatal = false): void {
     this.close();
-    this.events.onStatus("closed", detail);
+    this.events.onStatus("closed", detail, fatal);
   }
 }

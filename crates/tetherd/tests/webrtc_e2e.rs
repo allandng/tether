@@ -15,7 +15,7 @@ use tether_protocol::{
     PROTOCOL_VERSION, Resolution, Role, TextInput,
 };
 use tether_signal::protocol::{Caps, ClientMessage, ServerMessage};
-use tetherd::capture::{EncodedFrame, RawFrame, ScreenCapturer};
+use tetherd::capture::{RawFrame, ScreenCapturer};
 use tetherd::encode::JpegEncoder;
 use tetherd::input::InjectCommand;
 use tetherd::server::ServerState;
@@ -109,6 +109,7 @@ async fn webrtc_end_to_end_frames_and_input() {
         displays: pipeline.displays,
         select_display: pipeline.select_display,
     };
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(run_host(
         RtcConfig {
             signal_url: format!("ws://{signal_addr}/ws"),
@@ -118,6 +119,7 @@ async fn webrtc_end_to_end_frames_and_input() {
             stun: vec![], // loopback: host candidates suffice
         },
         state,
+        shutdown_rx,
     ));
     tokio::time::sleep(Duration::from_millis(300)).await; // let the host register
 
@@ -215,13 +217,13 @@ async fn webrtc_end_to_end_frames_and_input() {
         pc.on_ice_candidate(Box::new(move |c| {
             let sig_tx = sig_tx.clone();
             Box::pin(async move {
-                if let Some(c) = c {
-                    if let Ok(init) = c.to_json() {
-                        let _ = sig_tx.send(ClientMessage::Ice {
-                            target: "mac".into(),
-                            candidate: serde_json::to_string(&init).unwrap(),
-                        });
-                    }
+                if let Some(c) = c
+                    && let Ok(init) = c.to_json()
+                {
+                    let _ = sig_tx.send(ClientMessage::Ice {
+                        target: "mac".into(),
+                        candidate: serde_json::to_string(&init).unwrap(),
+                    });
                 }
             })
         }));
