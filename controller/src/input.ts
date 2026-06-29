@@ -83,10 +83,13 @@ export function attachInput(
   // reflects pinch zoom) on the way out. lastNorm carries the most recent
   // normalized point so button presses land where the cursor is.
   let lastNorm = { x: 0, y: 0 };
+  let currentMode: Mode = options.touchMode ?? "touch";
   const sink: GestureSink = {
     moveAbs: (cx, cy) => {
       lastNorm = normalizedFromClient(cx, cy, viewer.displayedRect());
       connection.sendInput({ type: "input", kind: "mousemove", x: lastNorm.x, y: lastNorm.y });
+      // trackpad mode: show a local cursor dot (zero-lag aiming feedback)
+      if (currentMode === "trackpad") viewer.setCursor(cx, cy);
     },
     down: (button) =>
       connection.sendInput({ type: "input", kind: "mousedown", button, x: lastNorm.x, y: lastNorm.y }),
@@ -238,7 +241,11 @@ export function attachInput(
   });
 
   return {
-    setMode: (mode: Mode) => gestures.setMode(mode),
+    setMode: (mode: Mode) => {
+      gestures.setMode(mode);
+      currentMode = mode;
+      if (mode !== "trackpad") viewer.hideCursor();
+    },
     /** Flush any in-flight gesture, releasing a held button on the CURRENT
      * transport. Call before swapping/closing transports so a HoldDrag's
      * mouseup can't be lost (which would leave the button stuck on the host). */
@@ -248,6 +255,7 @@ export function attachInput(
         timer = null;
       }
       gestures.reset();
+      viewer.hideCursor();
     },
   };
 }

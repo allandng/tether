@@ -33,11 +33,46 @@ export class Viewer {
   // per-pinch anchor state
   private pinch: { s0: number; fx0: number; fy0: number; pfx: number; pfy: number } | null = null;
 
+  private cursorEl: HTMLDivElement | null = null;
+
   constructor(private readonly canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d context");
     this.ctx = ctx;
     this.canvas.style.transformOrigin = "0 0";
+  }
+
+  /**
+   * Draw a client-side cursor dot at the given client-pixel point (for
+   * trackpad mode, where the only other feedback is the host cursor composited
+   * into the capture — which lags a frame). Client px is already zoom-correct.
+   */
+  setCursor(clientX: number, clientY: number): void {
+    if (typeof document === "undefined") return;
+    if (!this.cursorEl) {
+      const el = document.createElement("div");
+      Object.assign(el.style, {
+        position: "fixed",
+        width: "14px",
+        height: "14px",
+        marginLeft: "-7px",
+        marginTop: "-7px",
+        borderRadius: "50%",
+        border: "2px solid #fff",
+        boxShadow: "0 0 0 1.5px rgba(0,0,0,0.6)",
+        pointerEvents: "none",
+        zIndex: "9999",
+      } satisfies Partial<CSSStyleDeclaration>);
+      document.body.appendChild(el);
+      this.cursorEl = el;
+    }
+    this.cursorEl.style.left = `${clientX}px`;
+    this.cursorEl.style.top = `${clientY}px`;
+    this.cursorEl.style.display = "block";
+  }
+
+  hideCursor(): void {
+    if (this.cursorEl) this.cursorEl.style.display = "none";
   }
 
   setResolution(resolution: Resolution): void {

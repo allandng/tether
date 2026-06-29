@@ -247,6 +247,20 @@ describe("safety", () => {
     expect(events.filter((e) => e === "click(0)").length).toBe(2);
   });
 
+  it("trackpad cursor re-seeds to center on the first valid bounds (degenerate at attach)", () => {
+    // constructed with a degenerate rect (no frame yet), no explicit seed
+    const { m, events } = harness("trackpad", {
+      bounds: { left: 0, top: 0, width: 0, height: 0 },
+      seedCursor: undefined,
+    });
+    // a real displayed rect arrives (frames started)
+    m.setBounds({ left: 100, top: 50, width: 800, height: 600 }); // center (500,350)
+    m.onDown(1, 200, 200, 0);
+    m.onMove(1, 220, 200, 30); // +20x → cursor 520,350
+    m.onUp(1, 220, 200, 60);
+    expect(events).toContain("move(520,350)");
+  });
+
   it("onUp for an unknown pointer id is ignored (doesn't corrupt a live gesture)", () => {
     const { m, events } = harness("touch");
     m.onDown(1, 100, 100, 0); // a real finger is pending

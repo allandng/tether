@@ -109,6 +109,7 @@ export class GestureMachine {
 
   private vx: number;
   private vy: number;
+  private cursorSeeded: boolean;
 
   private longPressDeadline: number | null = null;
   private lastTap: { x: number; y: number; t: number } | null = null;
@@ -131,6 +132,10 @@ export class GestureMachine {
     };
     this.vx = seed.x;
     this.vy = seed.y;
+    // If seeded from an explicit point or a real (non-degenerate) rect, the
+    // virtual cursor is positioned; otherwise re-seed on the first valid bounds
+    // (the displayed rect is degenerate before the first frame arrives).
+    this.cursorSeeded = config.seedCursor != null || config.bounds.width > 1;
   }
 
   setMode(mode: Mode): void {
@@ -142,6 +147,12 @@ export class GestureMachine {
 
   setBounds(bounds: Rect): void {
     this.bounds = bounds;
+    if (!this.cursorSeeded && bounds.width > 1) {
+      // first valid displayed rect: center the trackpad cursor here
+      this.vx = bounds.left + bounds.width / 2;
+      this.vy = bounds.top + bounds.height / 2;
+      this.cursorSeeded = true;
+    }
   }
 
   reset(): void {
