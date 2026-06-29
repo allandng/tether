@@ -74,3 +74,16 @@ each got the simplest choice that doesn't block Phase 2.
 | **Display-switch flapping** | Any controller can switch the shared active display (last-wins); N controllers could fight. | Add a view-owner / arbitration if it bites. |
 | **Switch stalls capture thread** | `switch_display` blocks the capture thread on a synchronous SCK reconfigure (rare, user-initiated); a pathological SCK hang would stall frames. | Bound/offload the reconfigure off the frame thread. |
 | **displays() double-enumerate on switch** | `switch_display` and the republish each call `SCShareableContent::get()` — minor redundant work on a rare action. | If switching feels slow; return the list from `switch_display`. |
+
+## Post-5b hardening audit (residual, documented)
+
+A holistic audit after Phase 5b fixed the verified robustness/DoS findings (see
+git history); these residuals are documented rather than fixed:
+
+| Decision | Current behavior | Revisit when |
+|---|---|---|
+| **Signal TLS (`ws://`)** | Plain `ws://`; the `--secret` and SDP/ICE are cleartext on the wire. DTLS still encrypts media and the fingerprint binding still defeats an active media MITM. | Before exposing the signal server beyond a trusted tunnel/LAN: terminate `wss://` at a reverse proxy. |
+| **device_id squatting** | Any holder of the signal secret can register someone else's `device_id` and evict the live host (availability only — pairing still prevents impersonation). | Authenticate the signal directory per device, not just the relay. |
+| **Pairing-window interference** | The pairing lockout is host-global (it must be — per-device scoping would let an attacker rotate `device_id` to brute-force the 40-bit code). A secret-holder can therefore burn an *armed* code's attempts and trip the cooldown. Mitigated: failures only count while a code is armed, the cooldown is capped at ~8 min (was ~17 h), and it now logs loudly. | If interference is observed; consider an out-of-band confirm or narrowing who can attempt. |
+| **Token lifetime / revocation UX** | Device tokens are long-lived bearer credentials in browser `localStorage`; revocation exists (`PairingAuth::revoke`) but only in-process — no CLI/IPC to list/revoke without a restart. | Add a `tetherd devices list/revoke` surface + a token TTL before broad internet exposure. |
+| **Same-secret takeover** | A new WebRTC offer replaces the active peer; within one signal secret any paired device can take over a session. | If multi-controller arbitration becomes a product concern. |

@@ -31,6 +31,27 @@ iPad pass — see the gate-results docs. Consciously-cut corners live in
 - `controller/` — browser-based viewer/controller (TypeScript + Vite)
 - `docs/` — per-phase plans and gate results, protocol spec, deferred decisions
 
+See [docs/architecture.md](docs/architecture.md) for the component/data-flow
+overview and where state is persisted.
+
+## Prerequisites
+
+**Host (`tetherd`) — macOS only** (binds ScreenCaptureKit, VideoToolbox, AppKit):
+
+- macOS 13+ with the Swift toolchain: `xcode-select --install` (or full Xcode).
+- Rust (stable, edition 2024 — 1.85+): install via [rustup](https://rustup.rs).
+- `cmake` and `nasm` (build the JPEG encoder): `brew install cmake nasm`.
+
+**Signal server (`tether-signal`)** builds and runs on macOS *or* Linux — it
+carries no media, so you can host it on any small box. Same Rust toolchain; no
+Apple frameworks needed.
+
+**Controller** (browser app): Node 18+ (`brew install node`).
+
+Build the binaries once with `cargo build --release`; they land at
+`target/release/{tetherd,tether-signal}`. The examples below use `cargo run`
+for clarity — substitute the release binaries for real use.
+
 ## Running
 
 Two transports; run either or both.
@@ -78,6 +99,26 @@ TETHER_TURN_SECRET=<S> cargo run --release -p tether-signal -- \
     --turn-url 'turns:relay.example.com:5349?transport=tcp'
 ```
 
+The `static-auth-secret` in coturn must equal `TETHER_TURN_SECRET` (the signal
+server mints `username=<expiry>:<id>`, `password=base64(HMAC-SHA1(secret,
+username))`, which is exactly coturn's `use-auth-secret` scheme). A minimal
+`/etc/turnserver.conf`:
+
+```ini
+realm=relay.example.com
+use-auth-secret
+static-auth-secret=<S>          # == TETHER_TURN_SECRET
+listening-port=3478
+tls-listening-port=5349         # for turns:
+min-port=49152
+max-port=65535
+external-ip=<public-ip>         # if the relay is behind NAT
+```
+
+Open UDP/TCP 3478 (and 5349 for TLS) plus the `min-port`–`max-port` UDP range
+in the firewall. `brew install coturn` (macOS) or `apt install coturn` (Linux),
+then `turnserver -c /etc/turnserver.conf`.
+
 ### Multiple controllers & multi-monitor (Phase 5b)
 
 `--max-controllers N` (default 1) lets several paired devices view and control
@@ -112,6 +153,18 @@ cd controller && npm install && npm run dev          # same machine, or:
 npm run dev -- --host                                # reachable from LAN/iPad
 ```
 
+For a deployed controller, build the static bundle and serve `dist/` from any
+static server or reverse proxy:
+
+```sh
+cd controller && npm install && npm run build        # → controller/dist/
+npx vite preview --host                               # or: serve dist/ behind nginx/caddy
+```
+
+Serve it over **HTTPS** (or `http://localhost`) for anything real: pairing uses
+WebCrypto and clipboard auto-write needs a secure context, both of which the
+browser blocks on plain remote HTTP.
+
 Then enter `192.168.1.10:7878` in the connect bar (or open `?host=192.168.1.10:7878`).
 Click the canvas to give it focus; keyboard and mouse are forwarded while focused.
 
@@ -123,6 +176,43 @@ Click the canvas to give it focus; keyboard and mouse are forwarded while focuse
   Without it, `tetherd` exits at startup with an explanatory error.
 - **Accessibility** — System Settings → Privacy & Security → Accessibility.
   Without it, macOS silently discards injected input.
+
+> **TCC follows the launching binary.** The grant is tied to whichever app
+> started `tetherd` — so moving from your terminal to a launchd agent (below)
+> means re-granting both for that context, and TCC **cannot** be granted over a
+> headless SSH session (you need a logged-in GUI session to approve it once).
+
+## Running as a service
+
+`tetherd` and `tether-signal` are foreground processes; a service manager keeps
+them up. `tetherd` must run in your **logged-in GUI session** (it needs the
+window server + the TCC grants above), so a per-user **LaunchAgent** is the fit
+— `~/Library/LaunchAgents/com.tether.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.tether.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/tetherd</string>
+    <string>--signal</string><string>relay.example.com:443</string>
+    <string>--secret</string><string>CHANGE-ME</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/tetherd.log</string>
+</dict></plist>
+```
+
+`launchctl load ~/Library/LaunchAgents/com.tether.daemon.plist` (and
+`launchctl stop com.tether.daemon` sends SIGTERM, which `tetherd` handles by
+closing active sessions cleanly). Re-grant Screen Recording + Accessibility to
+the launchd context the first time. The **signal server** has no GUI/TCC needs,
+so on Linux a systemd unit (or any process supervisor) works; on macOS a
+LaunchDaemon is fine.
 
 ## Development
 
