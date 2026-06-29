@@ -20,6 +20,24 @@ struct Args {
     /// Pre-shared secret all devices must present to register.
     #[arg(long)]
     secret: String,
+
+    /// STUN URL(s) advertised to peers.
+    #[arg(long = "stun-url", default_value = "stun:stun.l.google.com:19302")]
+    stun_urls: Vec<String>,
+
+    /// TURN/TURNS URL(s) advertised to peers (e.g. turn:relay:3478?transport=udp).
+    /// Repeatable. STUN-only if omitted.
+    #[arg(long = "turn-url")]
+    turn_urls: Vec<String>,
+
+    /// coturn static-auth-secret for minting ephemeral TURN credentials. Prefer
+    /// TETHER_TURN_SECRET (env) over the flag, which is visible in `ps`.
+    #[arg(long, env = "TETHER_TURN_SECRET")]
+    turn_secret: Option<String>,
+
+    /// TURN credential lifetime in seconds (absolute expiry = now + ttl).
+    #[arg(long, default_value_t = 86_400)]
+    turn_ttl: u64,
 }
 
 #[tokio::main]
@@ -32,7 +50,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let state = AppState::new(args.secret);
+    let ice = tether_signal::turn::IceConfig {
+        stun_urls: args.stun_urls,
+        turn_urls: args.turn_urls,
+        turn_secret: args.turn_secret,
+        turn_ttl: args.turn_ttl,
+    };
+    if ice.turn_secret.is_some() && !ice.turn_urls.is_empty() {
+        info!(turn_urls = ?ice.turn_urls, "minting ephemeral TURN credentials");
+    }
+    let state = AppState::with_ice(args.secret, ice);
     let listener = tokio::net::TcpListener::bind((args.bind, args.port)).await?;
     info!(addr = %listener.local_addr()?, "signal server listening");
 

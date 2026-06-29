@@ -115,9 +115,20 @@ export class WebRtcTransport implements Transport {
     };
 
     const signaling = new SignalingClient({
-      onRegistered: () => {
+      onRegistered: (iceServers) => {
         void (async () => {
           try {
+            // Apply the server-supplied ICE servers (STUN + ephemeral TURN)
+            // before negotiating, so relay candidates are gathered.
+            if (iceServers.length > 0) {
+              pc.setConfiguration({
+                iceServers: iceServers.map((s) => ({
+                  urls: s.urls,
+                  username: s.username,
+                  credential: s.credential,
+                })),
+              });
+            }
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
             signaling.send({ type: "offer", target: config.targetHostId, sdp: offer.sdp ?? "" });

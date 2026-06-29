@@ -18,6 +18,17 @@ pub struct PeerInfo {
     pub caps: Caps,
 }
 
+/// An ICE server entry shaped for a browser `RTCPeerConnection` (STUN entries
+/// omit username/credential; TURN entries carry ephemeral coturn creds).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub credential: Option<String>,
+}
+
 /// Client → server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -44,7 +55,9 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    Registered,
+    /// Registration accepted; carries the ICE servers (STUN + ephemeral TURN)
+    /// the peer should use for its `RTCPeerConnection`.
+    Registered { ice_servers: Vec<IceServer> },
     /// Full directory snapshot, broadcast on every join/leave.
     Peers { peers: Vec<PeerInfo> },
     Offer { from: String, sdp: String },
@@ -87,9 +100,17 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
 
+        // STUN-only registered: TURN username/credential omitted
         assert_eq!(
-            serde_json::to_string(&ServerMessage::Registered).unwrap(),
-            r#"{"type":"registered"}"#
+            serde_json::to_string(&ServerMessage::Registered {
+                ice_servers: vec![IceServer {
+                    urls: vec!["stun:s:3478".into()],
+                    username: None,
+                    credential: None,
+                }],
+            })
+            .unwrap(),
+            r#"{"type":"registered","ice_servers":[{"urls":["stun:s:3478"]}]}"#
         );
         assert_eq!(
             serde_json::to_string(&ServerMessage::Answer {

@@ -27,7 +27,9 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use tether_protocol::{ClipboardData, Decoded, FrameData, Message, Resolution};
-use tether_signal::protocol::{Caps, ClientMessage, ErrorCode, ServerMessage};
+use tether_signal::protocol::{
+    Caps, ClientMessage, ErrorCode, IceServer as ServerIceServer, ServerMessage,
+};
 use tracing::{debug, info, warn};
 
 use crate::capture::EncodedFrame;
@@ -181,6 +183,10 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
     })?;
 
     let active: Arc<Mutex<Option<ActivePeer>>> = Arc::new(Mutex::new(None));
+    // ICE servers (STUN + ephemeral TURN) supplied by the signal server on
+    // Registered; defaults to the local STUN config until then.
+    let ice_servers: Arc<Mutex<Vec<RTCIceServer>>> =
+        Arc::new(Mutex::new(to_rtc_ice(&[], config)));
 
     let result = async {
         while let Some(msg) = ws_stream.next().await {
@@ -199,17 +205,23 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
                 }
             };
             match parsed {
-                ServerMessage::Registered => {
-                    info!(device_id = %config.device_id, "registered with signal server");
+                ServerMessage::Registered { ice_servers: servers } => {
+                    info!(
+                        device_id = %config.device_id,
+                        ice = servers.len(),
+                        "registered with signal server"
+                    );
+                    *ice_servers.lock().await = to_rtc_ice(&servers, config);
                 }
                 ServerMessage::Offer { from, sdp } => {
                     info!(%from, "received offer, starting peer session");
+                    let ice = ice_servers.lock().await.clone();
                     let mut slot = active.lock().await;
                     if let Some(old) = slot.take() {
                         info!(old = %old.controller_id, "replacing active peer session");
                         let _ = old.pc.close().await;
                     }
-                    match answer_offer(config, state, &signal_tx, from.clone(), sdp).await {
+                    match answer_offer(config, state, &signal_tx, from.clone(), sdp, ice).await {
                         Ok(pc) => *slot = Some(ActivePeer { controller_id: from, pc }),
                         Err(e) => warn!(error = %e, "failed to answer offer"),
                     }
@@ -250,20 +262,35 @@ async fn signal_session(config: &RtcConfig, state: &ServerState) -> anyhow::Resu
     result
 }
 
+/// Convert signal-server ICE entries to webrtc-rs `RTCIceServer`s, falling back
+/// to the host's local STUN config when the server advertised none.
+fn to_rtc_ice(servers: &[ServerIceServer], config: &RtcConfig) -> Vec<RTCIceServer> {
+    if servers.is_empty() {
+        return vec![RTCIceServer { urls: config.stun.clone(), ..Default::default() }];
+    }
+    servers
+        .iter()
+        .map(|s| RTCIceServer {
+            urls: s.urls.clone(),
+            username: s.username.clone().unwrap_or_default(),
+            credential: s.credential.clone().unwrap_or_default(),
+            ..Default::default()
+        })
+        .collect()
+}
+
 async fn answer_offer(
     config: &RtcConfig,
     state: &ServerState,
     signal_tx: &mpsc::UnboundedSender<ClientMessage>,
     from: String,
     offer_sdp: String,
+    ice_servers: Vec<RTCIceServer>,
 ) -> anyhow::Result<Arc<RTCPeerConnection>> {
     let api = APIBuilder::new().build();
     let pc = Arc::new(
         api.new_peer_connection(RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: config.stun.clone(),
-                ..Default::default()
-            }],
+            ice_servers,
             ..Default::default()
         })
         .await?,

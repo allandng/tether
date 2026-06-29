@@ -23,7 +23,14 @@ describe("cross-implementation JSON vectors", () => {
   });
 
   it("parses server messages in Rust serde shape", () => {
-    expect(parseServerMessage('{"type":"registered"}')).toEqual({ type: "registered" });
+    expect(
+      parseServerMessage('{"type":"registered","ice_servers":[{"urls":["stun:s:3478"]}]}'),
+    ).toEqual({ type: "registered", ice_servers: [{ urls: ["stun:s:3478"] }] });
+    expect(
+      parseServerMessage(
+        '{"type":"registered","ice_servers":[{"urls":["turn:t:3478"],"username":"1:u","credential":"abc="}]}',
+      ),
+    ).toMatchObject({ type: "registered", ice_servers: [{ username: "1:u", credential: "abc=" }] });
     expect(
       parseServerMessage('{"type":"answer","from":"mac","sdp":"v=0..."}'),
     ).toEqual({ type: "answer", from: "mac", sdp: "v=0..." });

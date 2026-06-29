@@ -15,6 +15,7 @@ use crate::protocol::{Caps, ClientMessage, ErrorCode, PeerInfo, ServerMessage};
 
 pub struct AppState {
     secret: String,
+    ice: crate::turn::IceConfig,
     devices: Mutex<HashMap<String, Device>>,
     conn_counter: AtomicU64,
 }
@@ -27,9 +28,23 @@ struct Device {
 }
 
 impl AppState {
+    /// Convenience for tests: STUN-only, no TURN.
     pub fn new(secret: String) -> Arc<Self> {
+        Self::with_ice(
+            secret,
+            crate::turn::IceConfig {
+                stun_urls: vec!["stun:stun.l.google.com:19302".into()],
+                turn_urls: Vec::new(),
+                turn_secret: None,
+                turn_ttl: 86_400,
+            },
+        )
+    }
+
+    pub fn with_ice(secret: String, ice: crate::turn::IceConfig) -> Arc<Self> {
         Arc::new(AppState {
             secret,
+            ice,
             devices: Mutex::new(HashMap::new()),
             conn_counter: AtomicU64::new(1),
         })
@@ -107,7 +122,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 }
                 registered_id = Some(device_id.clone());
                 info!(%device_id, %name, ?caps, "registered");
-                let _ = tx.send(ServerMessage::Registered);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let ice_servers = state.ice.ice_servers_for(&device_id, now);
+                let _ = tx.send(ServerMessage::Registered { ice_servers });
                 broadcast_peers(&devices);
             }
             ClientMessage::Offer { target, sdp } => {

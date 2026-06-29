@@ -2532,10 +2532,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "clap",
  "futures-util",
+ "hmac",
  "serde",
  "serde_json",
+ "sha1",
  "tokio",
  "tokio-tungstenite",
  "tracing",

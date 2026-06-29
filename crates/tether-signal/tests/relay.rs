@@ -78,7 +78,7 @@ async fn register(ws: &mut Client, device_id: &str, caps: Caps) {
     )
     .await;
     match recv(ws).await {
-        Some(ServerMessage::Registered) => {}
+        Some(ServerMessage::Registered { .. }) => {}
         other => panic!("expected Registered, got {other:?}"),
     }
 }

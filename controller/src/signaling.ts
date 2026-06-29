@@ -13,6 +13,12 @@ export interface PeerInfo {
   caps: Caps;
 }
 
+export interface IceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
+
 export type ClientMessage =
   | { type: "register"; device_id: string; name: string; caps: Caps; auth: string }
   | { type: "offer"; target: string; sdp: string }
@@ -20,7 +26,7 @@ export type ClientMessage =
   | { type: "ice"; target: string; candidate: string };
 
 export type ServerMessage =
-  | { type: "registered" }
+  | { type: "registered"; ice_servers: IceServer[] }
   | { type: "peers"; peers: PeerInfo[] }
   | { type: "offer"; from: string; sdp: string }
   | { type: "answer"; from: string; sdp: string }
@@ -28,7 +34,7 @@ export type ServerMessage =
   | { type: "error"; code: string; message: string };
 
 export interface SignalingEvents {
-  onRegistered(): void;
+  onRegistered(iceServers: IceServer[]): void;
   onPeers(peers: PeerInfo[]): void;
   onAnswer(from: string, sdp: string): void;
   onIce(from: string, candidate: string): void;
@@ -61,7 +67,7 @@ export class SignalingClient {
       if (!msg) return;
       switch (msg.type) {
         case "registered":
-          this.events.onRegistered();
+          this.events.onRegistered(msg.ice_servers ?? []);
           break;
         case "peers":
           this.events.onPeers(msg.peers);
