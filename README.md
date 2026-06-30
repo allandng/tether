@@ -38,9 +38,10 @@ overview and where state is persisted.
 
 **Host (`tetherd`) — macOS only** (binds ScreenCaptureKit, VideoToolbox, AppKit):
 
-- macOS 15+ with Xcode 16+ (macOS 15 SDK) — a transitive Metal dependency uses
-  macOS 15 APIs, so an older SDK won't compile. `xcode-select --install` (or
-  full Xcode).
+- macOS 26 (Tahoe) with Xcode 26 — a transitive Metal dependency
+  (`apple-metal` via `screencapturekit`) compiles against macOS 26 Metal 4
+  APIs, so an older SDK won't build. Full Xcode (not just the CLT) provides the
+  matching SDK.
 - Rust (stable, edition 2024 — 1.85+): install via [rustup](https://rustup.rs).
 - `cmake` and `nasm` (build the JPEG encoder): `brew install cmake nasm`.
 
