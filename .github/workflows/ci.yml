@@ -12,8 +12,10 @@ concurrency:
 jobs:
   rust:
     # tetherd binds to Apple frameworks (ScreenCaptureKit, VideoToolbox,
-    # AppKit) so the workspace only compiles on macOS.
-    runs-on: macos-14
+    # AppKit) so the workspace only compiles on macOS. macos-15 (Xcode 16 /
+    # macOS 15 SDK) is required: a transitive dep (apple-metal via
+    # screencapturekit) uses macOS 15 Metal APIs that the macos-14 SDK lacks.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
