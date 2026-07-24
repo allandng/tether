@@ -117,6 +117,7 @@ async fn webrtc_end_to_end_frames_and_input() {
             device_id: "mac".into(),
             device_name: "mac".into(),
             stun: vec![], // loopback: host candidates suffice
+            identity_seed: [42u8; 32],
         },
         state,
         shutdown_rx,
@@ -238,6 +239,10 @@ async fn webrtc_end_to_end_frames_and_input() {
                 can_control: true,
             },
             auth: SECRET.into(),
+            // A fresh, never-pinned controller id: identity is optional here,
+            // which is what lets a browser without WebCrypto Ed25519 connect.
+            pubkey: None,
+            sig: None,
         })
         .unwrap();
 

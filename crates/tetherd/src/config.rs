@@ -8,6 +8,11 @@ use clap::Parser;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "tetherd", version)]
 pub struct Args {
+    /// Management subcommands. With none, `tetherd` runs the daemon — so every
+    /// existing invocation keeps working unchanged.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// LAN transport: interface address to bind. Must be loopback or a
     /// private/link-local LAN address; 0.0.0.0 and public addresses are
     /// refused.
@@ -67,6 +72,30 @@ pub struct Args {
     /// paired. Dev/LAN only — defeats pairing; logged loudly.
     #[arg(long)]
     pub allow_unpaired: bool,
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum Command {
+    /// Inspect and revoke paired devices.
+    ///
+    /// Operates directly on `~/.config/tether/paired.json`. A running daemon
+    /// notices the change (it re-reads the file when its mtime moves), so a
+    /// revocation takes effect at the device's next connect without a restart.
+    Devices {
+        #[command(subcommand)]
+        action: DevicesAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum DevicesAction {
+    /// List every paired device.
+    List,
+    /// Revoke a device: it must pair again with a fresh code to reconnect.
+    Revoke {
+        /// The device id from `tetherd devices list`.
+        device_id: String,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,0 +1,38 @@
+# coturn configuration for the Tether relay.
+# Copy to turnserver.conf (which docker-compose.yml mounts read-only) and set
+# static-auth-secret. Do not commit the filled-in copy.
+#
+# static-auth-secret MUST be byte-for-byte equal to TETHER_TURN_SECRET in .env.
+# This is the single most common way a deployment breaks: everything looks
+# healthy, P2P sessions work, and only the sessions that need the relay fail —
+# with a generic ICE failure, because coturn rejects credentials the signal
+# server minted under a different secret. The signal server mints
+# username=<expiry>:<id> and password=base64(HMAC-SHA1(secret, username)),
+# which is exactly coturn's use-auth-secret scheme.
+
+realm=tether.example.com
+use-auth-secret
+static-auth-secret=CHANGE-ME
+listening-port=3478
+tls-listening-port=5349
+min-port=49152
+max-port=65535
+external-ip=203.0.113.10
+
+# Nothing manages this relay interactively, and the telnet CLI listens on 5766
+# with a weak default password. Turn it off.
+no-cli
+
+# realm and external-ip above are overridden by docker-compose.yml, which
+# passes --realm and --external-ip from TETHER_DOMAIN and TETHER_EXTERNAL_IP in
+# .env so the domain and public IP live in one place. The values here are what
+# apply if you run `turnserver -c turnserver.conf` outside compose.
+#
+# TURN over TLS (turns:, port 5349) needs a certificate. coturn will start
+# without one but the TLS listener is then useless. To reuse Caddy's
+# certificate, mount the caddy_data volume into the coturn service read-only
+# and point these at the leaf inside it — then reload coturn after each
+# renewal, since it reads the files only at startup:
+#
+# cert=/certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/tether.example.com/tether.example.com.crt
+# pkey=/certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/tether.example.com/tether.example.com.key

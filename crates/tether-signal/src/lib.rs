@@ -2,6 +2,7 @@
 //! carries media — WebRTC's DTLS gives the media path end-to-end encryption;
 //! this server only introduces peers.
 
+pub mod identity;
 pub mod protocol;
 pub mod server;
 pub mod turn;

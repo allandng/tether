@@ -17,8 +17,10 @@ struct Args {
     #[arg(long, default_value_t = 7879)]
     port: u16,
 
-    /// Pre-shared secret all devices must present to register.
-    #[arg(long)]
+    /// Pre-shared secret all devices must present to register. Prefer the
+    /// environment variable in a deployment: a flag is visible in `ps` and in
+    /// `docker inspect`.
+    #[arg(long, env = "TETHER_SECRET")]
     secret: String,
 
     /// STUN URL(s) advertised to peers.
@@ -39,6 +41,12 @@ struct Args {
     /// TURN credential lifetime in seconds (absolute expiry = now + ttl).
     #[arg(long, default_value_t = 86_400)]
     turn_ttl: u64,
+
+    /// Where to persist `device_id -> identity key` pins. Without it the pins
+    /// live in memory only, so every restart reopens the trust-on-first-use
+    /// window for every device — fine for a test run, not for a deployment.
+    #[arg(long)]
+    identity_store: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -59,7 +67,21 @@ async fn main() -> anyhow::Result<()> {
     if ice.turn_secret.is_some() && !ice.turn_urls.is_empty() {
         info!(turn_urls = ?ice.turn_urls, "minting ephemeral TURN credentials");
     }
-    let state = AppState::with_ice(args.secret, ice);
+    let identities = match &args.identity_store {
+        Some(path) => {
+            let store = tether_signal::identity::IdentityStore::load(path)?;
+            info!(path = %path.display(), pinned = store.len(), "identity pins loaded");
+            store
+        }
+        None => {
+            tracing::warn!(
+                "no --identity-store: device identity pins are in-memory only, so a \
+                 restart lets anyone with the secret re-claim any device id"
+            );
+            tether_signal::identity::IdentityStore::ephemeral()
+        }
+    };
+    let state = AppState::with_ice_and_identities(args.secret, ice, identities);
     let listener = tokio::net::TcpListener::bind((args.bind, args.port)).await?;
     info!(addr = %listener.local_addr()?, "signal server listening");
 

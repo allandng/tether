@@ -38,6 +38,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    if let Some(command) = &args.command {
+        return run_command(command);
+    }
     args.validate().map_err(anyhow::Error::msg)?;
 
     let pipeline = start_capture(args.codec, args.bitrate_kbps)?;
@@ -65,6 +68,10 @@ async fn main() -> anyhow::Result<()> {
             "paired devices loaded; auth required"
         );
     }
+    // Captured before the mutex swallows it: the WebRTC task signs every
+    // registration with this, and taking the lock on each reconnect would be
+    // needless contention for a value that never changes.
+    let identity_seed = pairing.signal_identity_seed();
     let auth = std::sync::Arc::new(tokio::sync::Mutex::new(pairing));
 
     let state = ServerState {
@@ -109,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
                 device_name: device_id.clone(),
                 device_id,
                 stun: args.stun.clone(),
+                identity_seed,
             };
             Some(tokio::spawn(tetherd::webrtc::run_host(
                 config,
@@ -140,6 +148,54 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Management subcommands. These operate on the on-disk pairing state and exit;
+/// they never start a capture pipeline, so they work on a machine where the
+/// daemon is already running (or where screen recording isn't granted at all).
+fn run_command(command: &tetherd::config::Command) -> anyhow::Result<()> {
+    use tetherd::config::{Command, DevicesAction};
+    let dir = tetherd::auth::PairingAuth::default_dir()?;
+    let mut auth = tetherd::auth::PairingAuth::load_or_create(&dir)?;
+    match command {
+        Command::Devices {
+            action: DevicesAction::List,
+        } => {
+            let devices = auth.paired_devices();
+            if devices.is_empty() {
+                println!("No paired devices. Start tetherd with --pair to add one.");
+                return Ok(());
+            }
+            let now = tetherd::auth::now_unix();
+            // Sorted so repeated runs are diffable rather than hash-ordered.
+            // sort_by, not sort_by_key: a key borrowed from the element can't
+            // outlive the closure call.
+            let mut rows: Vec<_> = devices.iter().collect();
+            rows.sort_by(|a, b| a.0.cmp(b.0));
+            println!("{:<34}  {:<20}  PAIRED", "DEVICE ID", "NAME");
+            for (id, dev) in rows {
+                let age_days = now.saturating_sub(dev.paired_at) / 86_400;
+                println!(
+                    "{:<34}  {:<20}  {} days ago (unix {})",
+                    id, dev.name, age_days, dev.paired_at
+                );
+            }
+        }
+        Command::Devices {
+            action: DevicesAction::Revoke { device_id },
+        } => {
+            if auth.revoke(device_id)? {
+                println!("Revoked {device_id}.");
+                println!(
+                    "A running tetherd picks this up at the device's next connect; \
+                     an active session is not cut off."
+                );
+            } else {
+                anyhow::bail!("no paired device with id {device_id}");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

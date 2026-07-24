@@ -82,8 +82,21 @@ git history); these residuals are documented rather than fixed:
 
 | Decision | Current behavior | Revisit when |
 |---|---|---|
-| **Signal TLS (`ws://`)** | Plain `ws://`; the `--secret` and SDP/ICE are cleartext on the wire. DTLS still encrypts media and the fingerprint binding still defeats an active media MITM. | Before exposing the signal server beyond a trusted tunnel/LAN: terminate `wss://` at a reverse proxy. |
-| **device_id squatting** | Any holder of the signal secret can register someone else's `device_id` and evict the live host (availability only — pairing still prevents impersonation). | Authenticate the signal directory per device, not just the relay. |
+| **Signal TLS (`ws://`)** | ~~Plain `ws://`~~ — **closed in Phase 6**: the controller derives `wss://` from the page scheme and `deploy/` terminates TLS at Caddy. | — |
+| **device_id squatting** | ~~Any holder of the signal secret can register someone else's `device_id`~~ — **closed in Phase 6** by Ed25519 identity pinning at the directory. A first-use race remains (below). | — |
 | **Pairing-window interference** | The pairing lockout is host-global (it must be — per-device scoping would let an attacker rotate `device_id` to brute-force the 40-bit code). A secret-holder can therefore burn an *armed* code's attempts and trip the cooldown. Mitigated: failures only count while a code is armed, the cooldown is capped at ~8 min (was ~17 h), and it now logs loudly. | If interference is observed; consider an out-of-band confirm or narrowing who can attempt. |
-| **Token lifetime / revocation UX** | Device tokens are long-lived bearer credentials in browser `localStorage`; revocation exists (`PairingAuth::revoke`) but only in-process — no CLI/IPC to list/revoke without a restart. | Add a `tetherd devices list/revoke` surface + a token TTL before broad internet exposure. |
+| **Token lifetime / revocation UX** | ~~Unexpiring tokens, in-process revocation only~~ — **closed in Phase 6**: 90-day TTL bound into the MAC, plus `tetherd devices list/revoke` with mtime-triggered reload. | — |
 | **Same-secret takeover** | A new WebRTC offer replaces the active peer; within one signal secret any paired device can take over a session. | If multi-controller arbitration becomes a product concern. |
+
+## Phase 6 additions
+
+| Decision | Phase 6 choice | Revisit when |
+|---|---|---|
+| **Trust on first use** | The signal server pins `device_id -> pubkey` on the *first* registration it sees. A squatter who reaches a never-registered id first pins their own key and locks the real host out until an operator edits the store. Starting your host once closes the window permanently. | If it matters: pre-seed the identity store from the host's public key out of band. |
+| **Identity optional for unpinned controllers** | Required so a browser without WebCrypto Ed25519 (below Safari 17 / Chrome 137 / Firefox 129) can still connect. A secret-holder can therefore claim an unpinned *controller* id — availability only; pairing still gates every host. | When requiring Ed25519 outright is safe. |
+| **Browser identity is unrecoverable if cleared** | Clearing `localStorage` mints a new key that the server refuses for the pinned id; recovery means removing the id from `--identity-store` by hand. | Phase 8 — a "forget this device" surface belongs with the machine list. |
+| **`--identity-store` is optional** | Without it, pins are in-memory and every restart reopens the first-use window for every device. The server logs a warning; `deploy/` always sets it. | Consider making it mandatory when `--bind` is not loopback. |
+| **`tetherd devices` has no IPC** | The CLI edits `paired.json` and the daemon picks it up via mtime. It cannot arm a pairing code — that still needs `--pair` at startup, which a background service has no terminal for. | Phase 9, which needs a real control socket for exactly this reason. |
+| **Revocation is not immediate** | Takes effect at the device's next connect; an in-flight session continues. | If immediate disconnection is wanted; the session layer would have to re-check mid-stream. |
+| **Token TTL forces one re-pair on upgrade** | Pre-Phase-6 tokens have no expiry segment and are refused outright rather than grandfathered. | Never — grandfathering an unexpiring credential defeats the change. |
+| **`native-tls` over rustls for the host's `wss://`** | webrtc-rs already links rustls; adding a second rustls provider risks a process-level provider panic. native-tls also uses the system trust store, which is right for a Let's Encrypt cert on macOS and Windows. | If a Linux host ever appears, native-tls there needs OpenSSL. |
