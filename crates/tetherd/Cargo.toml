@@ -11,9 +11,11 @@ bytes.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
 core-foundation = "0.10.1"
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 futures-util = "0.3.32"
 gethostname = "1.1.0"
 getrandom = "0.4.3"
+hex = "0.4"
 hmac = "0.12"
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
@@ -30,7 +32,7 @@ subtle = "2.6.1"
 tether-protocol.workspace = true
 tether-signal = { version = "0.1.0", path = "../tether-signal" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 turbojpeg = "1.4.0"

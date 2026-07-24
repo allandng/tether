@@ -2,3 +2,10 @@
 node_modules/
 dist/
 .DS_Store
+
+# Deploy stack: the built controller bundle, plus the two filled-in config
+# files, which hold secrets.
+deploy/site/*
+!deploy/site/.gitkeep
+deploy/.env
+deploy/turnserver.conf

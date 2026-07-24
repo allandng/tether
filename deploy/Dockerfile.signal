@@ -1,0 +1,58 @@
+# Build image for tether-signal only.
+#
+# tetherd is *not* in this image and cannot be: it links ScreenCaptureKit,
+# VideoToolbox and AppKit, so it only builds on macOS. `cargo build -p
+# tether-signal` resolves the whole workspace's dependency graph (including
+# tetherd's Apple crates, which is why the workspace manifests must all be
+# present below) but compiles only the selected package, so the Apple crates are
+# never built and the Linux build succeeds.
+#
+# The build context is the repository root, not deploy/:
+#   docker build -f deploy/Dockerfile.signal .
+# docker-compose.yml sets `context: ..` for the same reason.
+
+FROM rust:1.94-slim-trixie AS build
+
+WORKDIR /src
+
+# Every workspace member's manifest is needed for resolution, and Cargo.lock is
+# needed for --locked. tether-signal's dependencies are pure Rust (axum, tokio,
+# hmac, sha1), so no C toolchain or -dev packages are required here.
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
+COPY crates ./crates
+
+RUN cargo build --release -p tether-signal --locked
+
+FROM debian:trixie-slim
+
+# ca-certificates is not needed by the server itself — it terminates no TLS and
+# makes no outbound HTTPS calls — but it is cheap and keeps the image usable if
+# a future flag ever does.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --uid 10001 --user-group --no-create-home \
+      --shell /usr/sbin/nologin tether
+
+COPY --from=build /src/target/release/tether-signal /usr/local/bin/tether-signal
+
+# Identity-pin store lives here. Creating it owned by `tether` in the image
+# matters: Docker initializes an empty named volume from the image's directory,
+# ownership included. Without this the volume mounts root-owned and the
+# unprivileged process cannot write its pins.
+RUN mkdir -p /data && chown tether:tether /data
+VOLUME ["/data"]
+
+USER tether
+
+# Plain ws://, reachable only on the compose network. TLS terminates at Caddy;
+# nothing in this image handles certificates.
+EXPOSE 7879
+
+# No CMD: the secret comes from TETHER_SECRET and the rest of the flags from
+# docker-compose.yml, so any default here would only mislead someone running
+# the image bare. `--bind 0.0.0.0` is mandatory in a container — the server
+# defaults to 127.0.0.1, which nothing outside the container's netns can reach.
+ENTRYPOINT ["/usr/local/bin/tether-signal"]

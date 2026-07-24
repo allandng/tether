@@ -226,7 +226,7 @@ pub fn handle_auth_message(
 
     match msg {
         Message::Auth(a) => {
-            let ok = !gate_active || auth.verify_token(&a.device_id, &a.token);
+            let ok = !gate_active || auth.verify_token(&a.device_id, &a.token, now_unix);
             if ok {
                 (
                     Some(Message::AuthResult(AuthResult { ok: true })),

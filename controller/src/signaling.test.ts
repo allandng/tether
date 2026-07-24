@@ -13,6 +13,9 @@ describe("cross-implementation JSON vectors", () => {
       caps: { can_host: false, can_control: true },
       auth: "s3cret",
     };
+    // Identity fields must be absent, not null: the Rust side uses
+    // Option<String> with skip_serializing_if, so a null would fail to parse
+    // as an omitted field on a round trip.
     expect(JSON.parse(JSON.stringify(msg))).toEqual({
       type: "register",
       device_id: "ipad",
@@ -22,7 +25,35 @@ describe("cross-implementation JSON vectors", () => {
     });
   });
 
+  it("a signed register carries pubkey and sig", () => {
+    const msg: ClientMessage = {
+      type: "register",
+      device_id: "mac",
+      name: "Mac",
+      caps: { can_host: true, can_control: true },
+      auth: "s3cret",
+      pubkey: "aa",
+      sig: "bb",
+    };
+    expect(JSON.parse(JSON.stringify(msg))).toEqual({
+      type: "register",
+      device_id: "mac",
+      name: "Mac",
+      caps: { can_host: true, can_control: true },
+      auth: "s3cret",
+      pubkey: "aa",
+      sig: "bb",
+    });
+  });
+
   it("parses server messages in Rust serde shape", () => {
+    expect(parseServerMessage('{"type":"challenge","nonce":"deadbeef"}')).toEqual({
+      type: "challenge",
+      nonce: "deadbeef",
+    });
+    expect(
+      parseServerMessage('{"type":"error","code":"identity_mismatch","message":"pinned"}'),
+    ).toEqual({ type: "error", code: "identity_mismatch", message: "pinned" });
     expect(
       parseServerMessage('{"type":"registered","ice_servers":[{"urls":["stun:s:3478"]}]}'),
     ).toEqual({ type: "registered", ice_servers: [{ urls: ["stun:s:3478"] }] });

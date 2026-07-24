@@ -1,0 +1,44 @@
+# One origin for everything: the controller bundle at /, the signaling
+# WebSocket at /ws. The phone loads https://$TETHER_DOMAIN and page, signaling
+# and pairing all share that origin and one automatically-renewed certificate.
+#
+# TETHER_DOMAIN comes from the environment (docker-compose.yml passes it from
+# .env). Caddy resolves {$TETHER_DOMAIN} once, at config load.
+
+{$TETHER_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		# HSTS: the controller needs a secure context for WebCrypto (pairing)
+		# and clipboard writes, so there is no reason to ever fall back.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Cross-Origin-Opener-Policy same-origin
+		-Server
+	}
+
+	# Matched before the static handler, so the SPA fallback below never sees
+	# /ws and never answers a failed upgrade with index.html — which would look
+	# like a mysterious protocol error in the controller instead of a 502.
+	# reverse_proxy in Caddy v2 passes WebSocket upgrades through as-is; the
+	# manual Connection/Upgrade header dance from Caddy v1 is not needed and
+	# would break HTTP/2 to the backend.
+	handle /ws {
+		reverse_proxy signal:7879
+	}
+
+	handle {
+		root * /srv
+		# SPA fallback: unknown paths serve the app shell, real files win.
+		try_files {path} /index.html
+		file_server
+	}
+
+	# No Content-Security-Policy is set here. A useful one would have to spell
+	# out connect-src for the wss:// signal socket and the STUN/TURN endpoints
+	# the browser dials, and get those wrong and the failure appears only once a
+	# real session tries to connect. Add one after checking it against a built
+	# bundle and a live relay, not from a template.
+}

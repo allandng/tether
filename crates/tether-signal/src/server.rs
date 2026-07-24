@@ -13,6 +13,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
+use crate::identity::{IdentityError, IdentityStore};
 use crate::protocol::{Caps, ClientMessage, ErrorCode, PeerInfo, ServerMessage};
 
 /// A socket that never sends a valid `Register` is closed after this — keeps
@@ -32,6 +33,9 @@ pub struct AppState {
     secret: String,
     ice: crate::turn::IceConfig,
     devices: Mutex<HashMap<String, Device>>,
+    /// `device_id -> pubkey` pins. Separate lock from `devices` and never held
+    /// across it, so the two can't deadlock.
+    identities: Mutex<IdentityStore>,
     conn_counter: AtomicU64,
     conns: AtomicUsize,
 }
@@ -66,10 +70,19 @@ impl AppState {
     }
 
     pub fn with_ice(secret: String, ice: crate::turn::IceConfig) -> Arc<Self> {
+        Self::with_ice_and_identities(secret, ice, IdentityStore::ephemeral())
+    }
+
+    pub fn with_ice_and_identities(
+        secret: String,
+        ice: crate::turn::IceConfig,
+        identities: IdentityStore,
+    ) -> Arc<Self> {
         Arc::new(AppState {
             secret,
             ice,
             devices: Mutex::new(HashMap::new()),
+            identities: Mutex::new(identities),
             conn_counter: AtomicU64::new(1),
             conns: AtomicUsize::new(0),
         })
@@ -121,6 +134,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     });
 
     let conn_id = state.conn_counter.fetch_add(1, Ordering::Relaxed);
+    // Issued before anything else: the client signs this to prove it holds the
+    // identity key for the device_id it is about to claim. Fresh per connection
+    // so a captured signature is worthless on the next socket.
+    let nonce = crate::identity::new_nonce();
+    if tx
+        .try_send(ServerMessage::Challenge {
+            nonce: nonce.clone(),
+        })
+        .is_err()
+    {
+        return;
+    }
     let mut registered_id: Option<String> = None;
     let mut window_start = Instant::now();
     let mut in_window: u32 = 0;
@@ -176,6 +201,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 name,
                 caps,
                 auth,
+                pubkey,
+                sig,
             } => {
                 // Constant-time compare (consistent with the host's token /
                 // pairing-proof checks) to avoid leaking the secret by timing.
@@ -184,6 +211,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     let _ = tx.try_send(ServerMessage::Error {
                         code: ErrorCode::BadAuth,
                         message: "bad secret".into(),
+                    });
+                    break;
+                }
+                // Identity check comes *before* touching the device map: a
+                // refused registration must leave the incumbent host registered
+                // and undisturbed, which is the entire point of the pin.
+                if let Err(e) = state.identities.lock().await.authorize(
+                    &device_id,
+                    &nonce,
+                    pubkey.as_deref(),
+                    sig.as_deref(),
+                    caps.can_host,
+                ) {
+                    warn!(%device_id, error = %e, "registration identity refused");
+                    let _ = tx.try_send(ServerMessage::Error {
+                        code: match e {
+                            IdentityError::Missing => ErrorCode::IdentityRequired,
+                            IdentityError::Mismatch => ErrorCode::IdentityMismatch,
+                            IdentityError::Malformed(_) | IdentityError::BadSignature => {
+                                ErrorCode::BadIdentity
+                            }
+                        },
+                        message: e.to_string(),
                     });
                     break;
                 }

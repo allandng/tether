@@ -35,6 +35,15 @@ type HmacSha256 = Hmac<Sha256>;
 const CODE_TTL: Duration = Duration::from_secs(300);
 const LOCKOUT_THRESHOLD: u32 = 3;
 const LOCKOUT_SECS: u64 = 60;
+/// How long an issued device token stays valid (Phase 6). A token is a bearer
+/// credential sitting in browser `localStorage`, so an expiry bounds the damage
+/// from one that leaks: the exact number matters far less than the fact that a
+/// stolen token eventually stops working. Re-pairing mints a fresh one.
+const TOKEN_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+/// Domain separation for the Ed25519 signal-directory identity derived from
+/// `host_key`. Deriving rather than reusing the raw key keeps the HMAC token
+/// secret and the signature key in separate cryptographic domains.
+const SIGNAL_IDENTITY_CONTEXT: &[u8] = b"tether-signal-identity-v1";
 /// Crockford base32, excluding I/L/O/U to avoid transcription errors.
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -71,6 +80,11 @@ pub struct PairingAuth {
     host_key: [u8; 32],
     allowlist: Allowlist,
     allowlist_path: PathBuf,
+    /// Last-seen mtime of `allowlist_path`, so an out-of-process edit (the
+    /// `tetherd devices revoke` CLI) takes effect without a daemon restart.
+    /// Without this, revocation would silently do nothing until the next
+    /// restart — worse than having no CLI at all.
+    allowlist_mtime: Option<SystemTime>,
     active: Option<ActiveCode>,
     fail_count: u32,
     locked_until: u64,
@@ -88,10 +102,12 @@ impl PairingAuth {
         let host_key = load_or_create_host_key(&key_path)?;
         let allowlist_path = dir.join("paired.json");
         let allowlist = load_allowlist(&allowlist_path)?;
+        let allowlist_mtime = mtime_of(&allowlist_path);
         Ok(PairingAuth {
             host_key,
             allowlist,
             allowlist_path,
+            allowlist_mtime,
             active: None,
             fail_count: 0,
             locked_until: 0,
@@ -199,29 +215,50 @@ impl PairingAuth {
             },
         );
         self.persist()?;
-        Ok(self.token_for(device_id, now_unix))
+        Ok(self.token_for(device_id, now_unix, now_unix + TOKEN_TTL.as_secs()))
     }
 
-    fn token_for(&self, device_id: &str, paired_at: u64) -> String {
+    /// `"<expiry>.<mac>"`. The expiry travels in the clear *and* is covered by
+    /// the MAC, so a controller can't extend its own token by editing it.
+    fn token_for(&self, device_id: &str, paired_at: u64, expires_at: u64) -> String {
         let mac = hmac(
             &self.host_key,
-            format!("{device_id}:{paired_at}").as_bytes(),
+            format!("{device_id}:{paired_at}:{expires_at}").as_bytes(),
         );
-        hex(&mac)
+        format!("{expires_at}.{}", hex(&mac))
     }
 
-    /// Verify a presented token: the HMAC must match AND the device must still
-    /// be in the allowlist (so removal revokes).
-    pub fn verify_token(&self, device_id: &str, token: &str) -> bool {
+    /// Verify a presented token. All three must hold: it must not have expired,
+    /// the MAC must match, and the device must still be in the allowlist (so
+    /// removing it revokes even though the MAC still verifies).
+    ///
+    /// Takes `&mut self` because it first picks up any out-of-process edit to
+    /// `paired.json` — that is what makes `tetherd devices revoke` effective
+    /// against a running daemon.
+    pub fn verify_token(&mut self, device_id: &str, token: &str, now_unix: u64) -> bool {
+        self.reload_allowlist_if_changed();
+        let Some((expires_str, _)) = token.split_once('.') else {
+            // Pre-Phase-6 token shape: no expiry segment. Refuse it and let the
+            // controller re-pair rather than grandfathering an unexpiring one.
+            return false;
+        };
+        let Ok(expires_at) = expires_str.parse::<u64>() else {
+            return false;
+        };
+        if now_unix >= expires_at {
+            return false;
+        }
         let Some(dev) = self.allowlist.devices.get(device_id) else {
             return false;
         };
-        let expected = self.token_for(device_id, dev.paired_at);
-        // constant-time over bytes; lengths are fixed hex so this is safe
+        let expected = self.token_for(device_id, dev.paired_at, expires_at);
+        // Constant-time over bytes. Lengths are equal for any well-formed token
+        // (fixed-width hex MAC); ct_eq is length-safe regardless.
         expected.as_bytes().ct_eq(token.as_bytes()).into()
     }
 
     pub fn revoke(&mut self, device_id: &str) -> anyhow::Result<bool> {
+        self.reload_allowlist_if_changed();
         let removed = self.allowlist.devices.remove(device_id).is_some();
         if removed {
             self.persist()?;
@@ -229,10 +266,51 @@ impl PairingAuth {
         Ok(removed)
     }
 
-    fn persist(&self) -> anyhow::Result<()> {
-        let json = serde_json::to_vec_pretty(&self.allowlist)?;
-        atomic_write(&self.allowlist_path, &json, 0o600)
+    /// Re-read `paired.json` if something else wrote it. Cheap: one `stat` per
+    /// auth attempt, and auth attempts are rare (once per session).
+    fn reload_allowlist_if_changed(&mut self) {
+        let current = mtime_of(&self.allowlist_path);
+        if current == self.allowlist_mtime {
+            return;
+        }
+        match load_allowlist(&self.allowlist_path) {
+            Ok(fresh) => {
+                warn!(
+                    devices = fresh.devices.len(),
+                    "paired.json changed on disk; reloaded the device allowlist"
+                );
+                self.allowlist = fresh;
+                self.allowlist_mtime = current;
+            }
+            Err(e) => {
+                // Keep the in-memory copy: a half-written or unreadable file
+                // must not silently unpair every device.
+                warn!(error = %e, "paired.json changed but could not be reloaded; keeping the loaded copy");
+            }
+        }
     }
+
+    fn persist(&mut self) -> anyhow::Result<()> {
+        let json = serde_json::to_vec_pretty(&self.allowlist)?;
+        atomic_write(&self.allowlist_path, &json, 0o600)?;
+        // Record our own write so it doesn't read back as an external change.
+        self.allowlist_mtime = mtime_of(&self.allowlist_path);
+        Ok(())
+    }
+
+    /// Seed for the Ed25519 key this host identifies itself with at the signal
+    /// directory. Derived from `host_key` with domain separation so the raw key
+    /// never leaves this type and the two uses can't interfere.
+    pub fn signal_identity_seed(&self) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(self.host_key);
+        h.update(SIGNAL_IDENTITY_CONTEXT);
+        h.finalize().into()
+    }
+}
+
+fn mtime_of(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 /// Channel binding: a hash of the two DTLS fingerprints, order-independent, so
@@ -414,15 +492,106 @@ mod tests {
             panic!("expected Paired, got {outcome:?}");
         };
         assert!(!a.is_empty());
-        assert!(a.verify_token("dev1", &token));
-        assert!(!a.verify_token("dev2", &token)); // unknown device
-        assert!(!a.verify_token("dev1", "deadbeef")); // wrong token
+        assert!(a.verify_token("dev1", &token, 1002));
+        assert!(!a.verify_token("dev2", &token, 1002)); // unknown device
+        assert!(!a.verify_token("dev1", "deadbeef", 1002)); // wrong token
 
         // revoke → token stops working even though HMAC still matches
         assert!(a.revoke("dev1").unwrap());
-        assert!(!a.verify_token("dev1", &token));
+        assert!(!a.verify_token("dev1", &token, 1002));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn token_expires_and_the_expiry_cannot_be_edited() {
+        let dir = tmpdir("ttl");
+        let mut a = fresh(&dir);
+        let code = a.arm(1000);
+        let proof = pairing_proof(&code, &CHAN);
+        let PairOutcome::Paired { token } = a
+            .verify_pairing("dev1", "iPad", &proof, &CHAN, 1001)
+            .unwrap()
+        else {
+            panic!("expected Paired");
+        };
+
+        let expires_at = 1001 + TOKEN_TTL.as_secs();
+        assert!(a.verify_token("dev1", &token, expires_at - 1));
+        assert!(
+            !a.verify_token("dev1", &token, expires_at),
+            "a token must stop working at its expiry"
+        );
+
+        // Rewriting the cleartext expiry must not extend the token: the expiry
+        // is covered by the MAC.
+        let (_, mac) = token.split_once('.').unwrap();
+        let forged = format!("{}.{mac}", expires_at + 86_400);
+        assert!(!a.verify_token("dev1", &forged, expires_at + 1));
+
+        // A pre-Phase-6 token (no expiry segment) is refused outright.
+        assert!(!a.verify_token("dev1", mac, 1002));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `tetherd devices revoke` edits paired.json out of process; a running
+    /// daemon has to notice, or revocation is a no-op until restart.
+    #[test]
+    fn external_edit_to_paired_json_is_picked_up() {
+        let dir = tmpdir("reload-external");
+        let mut a = fresh(&dir);
+        let code = a.arm(1000);
+        let proof = pairing_proof(&code, &CHAN);
+        let PairOutcome::Paired { token } = a
+            .verify_pairing("dev1", "iPad", &proof, &CHAN, 1001)
+            .unwrap()
+        else {
+            panic!("expected Paired");
+        };
+        assert!(a.verify_token("dev1", &token, 1002));
+
+        // Another process revokes the device.
+        let mut b = fresh(&dir);
+        assert!(b.revoke("dev1").unwrap());
+
+        // mtime has 1 s granularity on some filesystems; make the change
+        // unambiguous rather than racing the clock.
+        let path = dir.join("paired.json");
+        let future = SystemTime::now() + Duration::from_secs(5);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+
+        assert!(
+            !a.verify_token("dev1", &token, 1002),
+            "the running daemon must pick up an out-of-process revocation"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn signal_identity_is_derived_stably_and_is_not_the_host_key() {
+        let dir = tmpdir("identity");
+        let a = fresh(&dir);
+        let seed = a.signal_identity_seed();
+        assert_eq!(seed, fresh(&dir).signal_identity_seed(), "must be stable");
+        assert_ne!(
+            seed, a.host_key,
+            "the signing seed must not be the raw token-signing key"
+        );
+
+        let other = tmpdir("identity-2");
+        assert_ne!(
+            seed,
+            fresh(&other).signal_identity_seed(),
+            "a different host must get a different identity"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&other).ok();
     }
 
     #[test]
@@ -441,8 +610,8 @@ mod tests {
             }
         };
         // a brand-new instance (reloaded host_key + allowlist) still verifies it
-        let b = fresh(&dir);
-        assert!(b.verify_token("dev1", &token));
+        let mut b = fresh(&dir);
+        assert!(b.verify_token("dev1", &token, 1002));
         std::fs::remove_dir_all(&dir).ok();
     }
 

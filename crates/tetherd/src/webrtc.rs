@@ -135,6 +135,23 @@ pub struct RtcConfig {
     pub device_id: String,
     pub device_name: String,
     pub stun: Vec<String>,
+    /// Ed25519 seed for this host's signal-directory identity, derived from
+    /// `host.key` (see `PairingAuth::signal_identity_seed`). The server pins
+    /// `device_id -> pubkey` on first use, so nobody else past the shared
+    /// secret can claim this id and evict us.
+    pub identity_seed: [u8; 32],
+}
+
+/// Prove possession of this host's identity key over the server's per-connection
+/// nonce. Returns `(pubkey_hex, sig_hex)` for the `Register` message.
+fn sign_registration(seed: &[u8; 32], nonce: &str, device_id: &str) -> (String, String) {
+    use ed25519_dalek::{Signer, SigningKey};
+    let key = SigningKey::from_bytes(seed);
+    let sig = key.sign(&tether_signal::identity::register_payload(nonce, device_id));
+    (
+        hex::encode(key.verifying_key().to_bytes()),
+        hex::encode(sig.to_bytes()),
+    )
 }
 
 /// Register as a host and serve WebRTC sessions until shutdown is signalled.
@@ -202,15 +219,8 @@ async fn signal_session(
         }
     });
 
-    signal_tx.send(ClientMessage::Register {
-        device_id: config.device_id.clone(),
-        name: config.device_name.clone(),
-        caps: Caps {
-            can_host: true,
-            can_control: true,
-        },
-        auth: config.secret.clone(),
-    })?;
+    // Registration waits for the server's Challenge — we can't sign a nonce we
+    // haven't been given yet. See ServerMessage::Challenge below.
 
     let active: Arc<Mutex<Option<ActivePeer>>> = Arc::new(Mutex::new(None));
     // ICE servers (STUN + ephemeral TURN) supplied by the signal server on
@@ -245,6 +255,21 @@ async fn signal_session(
                 }
             };
             match parsed {
+                ServerMessage::Challenge { nonce } => {
+                    let (pubkey, sig) =
+                        sign_registration(&config.identity_seed, &nonce, &config.device_id);
+                    signal_tx.send(ClientMessage::Register {
+                        device_id: config.device_id.clone(),
+                        name: config.device_name.clone(),
+                        caps: Caps {
+                            can_host: true,
+                            can_control: true,
+                        },
+                        auth: config.secret.clone(),
+                        pubkey: Some(pubkey),
+                        sig: Some(sig),
+                    })?;
+                }
                 ServerMessage::Registered {
                     ice_servers: servers,
                 } => {
@@ -296,6 +321,22 @@ async fn signal_session(
                 ServerMessage::Error { code, message } => {
                     if code == ErrorCode::Replaced {
                         anyhow::bail!("another tetherd registered this device id: {message}");
+                    }
+                    // An identity refusal will not fix itself by retrying, and
+                    // the reconnect loop would otherwise hammer the server
+                    // forever with the same rejected key. Say what to do.
+                    if matches!(
+                        code,
+                        ErrorCode::IdentityMismatch
+                            | ErrorCode::IdentityRequired
+                            | ErrorCode::BadIdentity
+                    ) {
+                        anyhow::bail!(
+                            "signal server refused this host's identity ({code:?}): {message}. \
+                             The device id is pinned to a different host.key — either pick a \
+                             different --device-id, or remove this id from the server's \
+                             --identity-store if you really did replace the host."
+                        );
                     }
                     warn!(?code, %message, "signal server error");
                 }

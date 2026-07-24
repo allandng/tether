@@ -13,13 +13,14 @@
 
 import { FrameReassembler, chunkFrame } from "./chunks";
 import type { ConnectionEvents, Transport } from "./connection";
+import { loadOrCreateIdentity } from "./identity";
 import { channelBinding, sdpFingerprint, tokenStore } from "./pairing";
 import { encodeClipboardData, type InputEvent } from "./protocol";
 import { type AuthContext, ProtocolSession } from "./session";
 import { SignalingClient } from "./signaling";
 
 export interface RtcConfig {
-  signalUrl: string; // e.g. ws://server:7879/ws
+  signalUrl: string; // full ws:// or wss:// URL — see signalUrl() in signaling.ts
   secret: string;
   deviceId: string;
   deviceName: string;
@@ -175,11 +176,22 @@ export class WebRtcTransport implements Transport {
       }
     };
 
-    signaling.connect(config.signalUrl, {
-      device_id: config.deviceId,
-      name: config.deviceName,
-      caps: { can_host: false, can_control: true },
-      auth: config.secret,
+    signaling.connect(config.signalUrl, async (nonce) => {
+      const identity = await loadOrCreateIdentity();
+      return {
+        device_id: config.deviceId,
+        name: config.deviceName,
+        caps: { can_host: false, can_control: true },
+        auth: config.secret,
+        // Undefined (not null) when this browser lacks Ed25519, so the fields
+        // are omitted from the JSON entirely.
+        ...(identity
+          ? {
+              pubkey: identity.pubkey,
+              sig: await identity.sign(nonce, config.deviceId),
+            }
+          : {}),
+      };
     });
   }
 
@@ -239,4 +251,15 @@ export class WebRtcTransport implements Transport {
 /** Signal-server errors that retrying won't fix: wrong secret, a target that
  * isn't a valid host, or a protocol-order bug. (`unknown_target` is transient —
  * the host may just be momentarily offline — so it is NOT fatal.) */
-const FATAL_SIGNAL_CODES = new Set(["bad_auth", "target_not_host", "not_registered"]);
+// Refusals that retrying cannot fix. The identity codes join the list because
+// a pinned device id will keep rejecting this browser's key until someone
+// intervenes on the server; silently reconnecting forever would just hide it.
+const FATAL_SIGNAL_CODES = new Set([
+  "bad_auth",
+  "target_not_host",
+  "not_registered",
+  "identity_required",
+  "identity_mismatch",
+  "bad_identity",
+  "identity_failed",
+]);

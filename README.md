@@ -17,7 +17,7 @@ for media (peer-to-peer, DTLS-encrypted).
 | 4 — Touch UX | Gesture engine (tap/long-press/2-finger scroll/pinch), soft-keyboard TextInput, phone UI | ✅ Done — [gate results](docs/phase4-gate-results.md) (synthetic-touch verified; iPad pass pending) |
 | 5 — Secure-internet | Device pairing auth (DTLS-bound, revocable), TURN relay config, adaptive bitrate | ✅ Done — [gate results](docs/phase5-gate-results.md) (live relay traversal pending) |
 | 5b — Further hardening | Multi-monitor (switchable), multiple controllers (`--max-controllers`), client-drawn cursor | ✅ Done — [gate results](docs/phase5b-gate-results.md) (multi-display switch pending real hardware) |
-| 6 — Reachable | `wss://` end to end, deployable signal+TURN stack, authenticated signal directory, revocation CLI | 📋 [Planned](docs/phase6-plan.md) |
+| 6 — Reachable | `wss://` end to end, deployable signal+TURN stack, authenticated signal directory, revocation CLI | ✅ Done — [gate results](docs/phase6-gate-results.md) (live WAN/TURN run still pending) |
 | 7 — Windows host | WGC capture, Media Foundation H.264, `SendInput`, Win32 clipboard | 📋 [Planned](docs/phase7-plan.md) |
 | 8 — Machine list | Saved machines with online state, one-tap connect, PWA install | 📋 [Planned](docs/phase8-plan.md) |
 | 9 — Packaging | `.pkg` / `.msi`, config file, auto-start at login, guided permission grants | 📋 [Planned](docs/phase9-plan.md) |
@@ -90,15 +90,31 @@ secret, and the host's device id (its hostname unless `--device-id` was set).
 Media flows peer-to-peer (DTLS-encrypted); the signal server only introduces
 the peers.
 
+### Deploying it on the internet (Phase 6)
+
+`deploy/` has a docker-compose stack — Caddy for TLS, the signal server, and
+coturn — that puts the controller and the signal endpoint on one hostname, so a
+phone just opens `https://tether.example.com`. See
+[deploy/README.md](deploy/README.md) for the runbook (VPS sizing, DNS, firewall
+rules). Point the host at it with `--signal wss://tether.example.com/ws`.
+
+Give the signal server `--identity-store <path>`. It pins each `device_id` to
+the public key that first registered it, so nobody else holding the shared
+secret can claim your host's id and evict it. Without the flag those pins are
+in-memory and a restart reopens the window.
+
 ### Device pairing (Phase 5)
 
 The shared `--secret` only gates the signal server. To authorize a *device*,
 pair it once: start the host with `--pair` (or `--require-pairing` to refuse
 all unpaired controllers), read the printed code, and enter it in the
 controller when prompted. The host issues a per-device token (stored in the
-browser) so future connects need no code. The pairing proof is bound to the
-DTLS fingerprints, so a malicious signal relay can't MITM it. Revoke by
-deleting the device from `~/.config/tether/paired.json`.
+browser, valid 90 days) so future connects need no code. The pairing proof is
+bound to the DTLS fingerprints, so a malicious signal relay can't MITM it.
+
+List and revoke paired devices with `tetherd devices list` and `tetherd devices
+revoke <id>`. A running daemon notices the change and refuses that device at its
+next connect — no restart needed.
 
 ### TURN relay (for symmetric NAT)
 

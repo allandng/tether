@@ -1,0 +1,96 @@
+# Tether public stack: TLS + controller bundle (caddy), signaling (signal),
+# relay (coturn). Copy .env.example to .env and fill it in before `docker
+# compose up -d`. See README.md in this directory.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      # Caddy substitutes {$TETHER_DOMAIN} in the Caddyfile at config load and
+      # requests a certificate for it. The DNS A record must already resolve
+      # here or the ACME challenge fails on first start.
+      TETHER_DOMAIN: ${TETHER_DOMAIN:?set TETHER_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./site:/srv:ro # built controller bundle; see README
+      - caddy_data:/data # certificates and ACME account keys — keep this
+      - caddy_config:/config
+    depends_on:
+      - signal
+
+  signal:
+    build:
+      # The context is the repository root: the Dockerfile builds the binary
+      # from the workspace, so it needs Cargo.lock and every member manifest.
+      context: ..
+      dockerfile: deploy/Dockerfile.signal
+    restart: unless-stopped
+    environment:
+      # Both secrets are passed by environment, never as flags: a flag lands in
+      # the container's argv, which `docker inspect` and `ps` on the host both
+      # show. TETHER_TURN_SECRET must equal static-auth-secret in
+      # turnserver.conf.
+      TETHER_SECRET: ${TETHER_SECRET:?set TETHER_SECRET in .env}
+      TETHER_TURN_SECRET: ${TETHER_TURN_SECRET:?set TETHER_TURN_SECRET in .env}
+    # No `ports:` — deliberate. The signal server speaks plain ws:// and is
+    # reachable only from Caddy over the compose network. Nothing on the
+    # internet talks to it directly.
+    volumes:
+      # Device identity pins. Without a persistent store every restart reopens
+      # the trust-on-first-use window, so anyone holding TETHER_SECRET could
+      # re-claim a device id and evict the real host.
+      - signal_data:/data
+    command:
+      - --bind
+      - 0.0.0.0
+      - --identity-store
+      - /data/identities.json
+      - --turn-url
+      - turn:${TETHER_DOMAIN}:3478?transport=udp
+      - --turn-url
+      - turn:${TETHER_DOMAIN}:3478?transport=tcp
+      # turns: over TLS needs a certificate in coturn; it is off by default.
+      # See "TURN over TLS" in README.md before uncommenting.
+      # - --turn-url
+      # - turns:${TETHER_DOMAIN}:5349?transport=tcp
+
+  coturn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    # network_mode: host is required, not a shortcut. Two reasons:
+    #   1. The relay allocates from a 16k-port UDP range (49152-65535). Docker's
+    #      userland proxy spawns a forwarder per published port, so publishing
+    #      that range normally exhausts memory and file descriptors before the
+    #      stack is up.
+    #   2. coturn must see real client source addresses and bind the real public
+    #      IP, because it advertises them as relay candidates. Behind Docker's
+    #      NAT it would offer an unreachable 172.x address.
+    #
+    # The consequence is that coturn is not on the compose network and cannot be
+    # reached at the name `coturn` by the other services. That is fine: the
+    # signal server only *mints* TURN credentials with a shared HMAC secret; it
+    # never connects to the relay. Only the browser and the host daemon do, over
+    # the public address.
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    # --realm and --external-ip come from .env and override the values in the
+    # config file, so the domain and public IP live in exactly one place. The
+    # auth secret stays in the file: on the command line it would show up in
+    # `ps` on the host, which host networking makes fully visible.
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      - --realm=${TETHER_DOMAIN}
+      - --external-ip=${TETHER_EXTERNAL_IP:?set TETHER_EXTERNAL_IP in .env}
+      - --log-file=stdout
+
+volumes:
+  caddy_data:
+  caddy_config:
+  signal_data:

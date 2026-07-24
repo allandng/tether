@@ -3,6 +3,7 @@ import { TetherConnection, type ConnectionEvents, type Transport } from "./conne
 import { attachInput } from "./input";
 import { SoftKeyboard } from "./keyboard";
 import type { Mode } from "./gestures";
+import { signalUrl } from "./signaling";
 import { Viewer } from "./viewer";
 import { WebRtcTransport } from "./webrtc";
 
@@ -197,7 +198,7 @@ function setup(): void {
       const t = new WebRtcTransport(events);
       active = t;
       t.connect({
-        signalUrl: `ws://${signalInput.value.trim()}/ws`,
+        signalUrl: signalUrl(signalInput.value),
         secret: secretInput.value,
         deviceId,
         deviceName: deviceId,
