@@ -742,7 +742,7 @@ mod tests {
         let code_b = b.arm(1000);
         b.verify_pairing("dev", "x", &pairing_proof(&code_b, &CHAN), &CHAN, 1001)
             .unwrap();
-        assert!(!b.verify_token("dev", &token));
+        assert!(!b.verify_token("dev", &token, 1002));
         std::fs::remove_dir_all(&dir_a).ok();
         std::fs::remove_dir_all(&dir_b).ok();
     }

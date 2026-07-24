@@ -168,9 +168,11 @@ fn run_command(command: &tetherd::config::Command) -> anyhow::Result<()> {
             }
             let now = tetherd::auth::now_unix();
             // Sorted so repeated runs are diffable rather than hash-ordered.
+            // sort_by, not sort_by_key: a key borrowed from the element can't
+            // outlive the closure call.
             let mut rows: Vec<_> = devices.iter().collect();
-            rows.sort_by_key(|(id, _)| id.as_str());
-            println!("{:<34}  {:<20}  {}", "DEVICE ID", "NAME", "PAIRED");
+            rows.sort_by(|a, b| a.0.cmp(b.0));
+            println!("{:<34}  {:<20}  PAIRED", "DEVICE ID", "NAME");
             for (id, dev) in rows {
                 let age_days = now.saturating_sub(dev.paired_at) / 86_400;
                 println!(
