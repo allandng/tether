@@ -17,11 +17,22 @@ for media (peer-to-peer, DTLS-encrypted).
 | 4 — Touch UX | Gesture engine (tap/long-press/2-finger scroll/pinch), soft-keyboard TextInput, phone UI | ✅ Done — [gate results](docs/phase4-gate-results.md) (synthetic-touch verified; iPad pass pending) |
 | 5 — Secure-internet | Device pairing auth (DTLS-bound, revocable), TURN relay config, adaptive bitrate | ✅ Done — [gate results](docs/phase5-gate-results.md) (live relay traversal pending) |
 | 5b — Further hardening | Multi-monitor (switchable), multiple controllers (`--max-controllers`), client-drawn cursor | ✅ Done — [gate results](docs/phase5b-gate-results.md) (multi-display switch pending real hardware) |
+| 6 — Reachable | `wss://` end to end, deployable signal+TURN stack, authenticated signal directory, revocation CLI | 📋 [Planned](docs/phase6-plan.md) |
+| 7 — Windows host | WGC capture, Media Foundation H.264, `SendInput`, Win32 clipboard | 📋 [Planned](docs/phase7-plan.md) |
+| 8 — Machine list | Saved machines with online state, one-tap connect, PWA install | 📋 [Planned](docs/phase8-plan.md) |
+| 9 — Packaging | `.pkg` / `.msi`, config file, auto-start at login, guided permission grants | 📋 [Planned](docs/phase9-plan.md) |
+| 10 — Audio | System-audio capture, Opus, a real WebRTC audio track | 📋 [Planned](docs/phase10-plan.md) |
+| 11 — File transfer | Chunked transfer over the existing `tether-bulk` channel | 📋 [Planned](docs/phase11-plan.md) |
 
 Verified end-to-end on a single machine (including connect-while-display-asleep
 → input wakes it). Remaining human checks: a real two-device WAN run and an
 iPad pass — see the gate-results docs. Consciously-cut corners live in
 [deferred.md](docs/deferred.md).
+
+Phases 1–5b are a working engine. Phases 6–11 close the gap to what Chrome
+Remote Desktop did — reachable from anywhere, a Windows host, and installable —
+and are laid out in the [roadmap](docs/roadmap.md), which also covers the
+locked-screen constraint that shapes several of them.
 
 ## Layout
 
