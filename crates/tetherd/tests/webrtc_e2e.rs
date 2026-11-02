@@ -108,6 +108,12 @@ async fn webrtc_end_to_end_frames_and_input() {
         controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         displays: pipeline.displays,
         select_display: pipeline.select_display,
+        host_name: "test-host".into(),
+        files: std::sync::Arc::new(tetherd::files::FileConfig {
+            dir: std::env::temp_dir().join("tether-test-uploads"),
+            max_upload_bytes: 1 << 30,
+        }),
+        audio: None,
     };
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(run_host(
@@ -243,6 +249,7 @@ async fn webrtc_end_to_end_frames_and_input() {
             // which is what lets a browser without WebCrypto Ed25519 connect.
             pubkey: None,
             sig: None,
+            os: String::new(),
         })
         .unwrap();
 

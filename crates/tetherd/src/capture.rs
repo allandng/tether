@@ -14,6 +14,8 @@ pub struct RawFrame {
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(windows)]
+pub mod windows;
 
 /// One encoded frame ready for the wire. Cheap to clone (payload is refcounted).
 #[derive(Debug, Clone)]

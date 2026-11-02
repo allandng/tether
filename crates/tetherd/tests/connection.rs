@@ -53,7 +53,13 @@ async fn start_host() -> TestHost {
 fn temp_auth_dir() -> std::path::PathBuf {
     let mut d = std::env::temp_dir();
     d.push(format!("tether-conn-test-{}", std::process::id()));
-    d.push(format!("{:?}", std::time::Instant::now()).replace([' ', '.', '{', '}'], "_"));
+    // A process-wide counter, not a timestamp: two tests starting in the same
+    // clock tick (Windows' Instant is coarse) must never share a directory.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    d.push(
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string(),
+    );
     d
 }
 
@@ -92,6 +98,12 @@ async fn start_host_slots(policy: AuthPolicy, slots: usize) -> TestHost {
             controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(slots)),
             displays: displays_rx,
             select_display: select_display_tx,
+            host_name: "test-host".into(),
+            files: std::sync::Arc::new(tetherd::files::FileConfig {
+                dir: std::env::temp_dir().join("tether-test-uploads"),
+                max_upload_bytes: 1 << 30,
+            }),
+            audio: None,
         },
     )
     .await
@@ -124,6 +136,18 @@ async fn connect(addr: SocketAddr) -> Client {
     ws
 }
 
+/// Connect, retrying while the single controller slot is still held by a
+/// session the server hasn't finished tearing down.
+async fn connect_retry(addr: SocketAddr) -> Client {
+    for _ in 0..100 {
+        if let Ok((ws, _)) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await {
+            return ws;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("server never accepted a reconnect");
+}
+
 fn controller_hello() -> WsMessage {
     WsMessage::Binary(
         Message::Hello(Hello {
@@ -135,7 +159,18 @@ fn controller_hello() -> WsMessage {
     )
 }
 
+/// The next message, skipping the informational `HostInfo` the host sends
+/// once after the handshake (asserted on its own in `host_announces_itself`).
 async fn next_message(ws: &mut Client) -> Option<Message> {
+    loop {
+        match next_any_message(ws).await? {
+            Message::HostInfo(_) => continue,
+            other => return Some(other),
+        }
+    }
+}
+
+async fn next_any_message(ws: &mut Client) -> Option<Message> {
     loop {
         match ws.next().await? {
             Ok(WsMessage::Binary(bytes)) => match Message::decode(&bytes).expect("decode") {
@@ -266,10 +301,12 @@ async fn pairing_lifecycle() {
         next_message(&mut ws).await,
         Some(Message::Resolution(_))
     ));
-    drop(ws);
+    ws.close(None).await.expect("close");
 
-    // 3. reconnect with the token → authenticated, no code needed
-    let mut ws = connect(host.addr).await;
+    // 3. reconnect with the token → authenticated, no code needed. The slot is
+    // released asynchronously when the server sees the close, so an immediate
+    // reconnect can still be turned away; retry briefly like a real client.
+    let mut ws = connect_retry(host.addr).await;
     ws.send(controller_hello()).await.unwrap();
     assert!(matches!(
         next_message(&mut ws).await,
@@ -291,11 +328,11 @@ async fn pairing_lifecycle() {
         next_message(&mut ws).await,
         Some(Message::Resolution(_))
     ));
-    drop(ws);
+    ws.close(None).await.expect("close");
 
     // 4. revoke → the same token is rejected
     assert!(host.auth.lock().await.revoke("ipad").unwrap());
-    let mut ws = connect(host.addr).await;
+    let mut ws = connect_retry(host.addr).await;
     ws.send(controller_hello()).await.unwrap();
     assert!(matches!(
         next_message(&mut ws).await,
@@ -611,4 +648,107 @@ async fn host_role_peer_is_rejected() {
         next_message(&mut ws).await.is_none(),
         "host must not accept another host as a peer"
     );
+}
+
+#[tokio::test]
+async fn host_announces_itself_after_the_handshake() {
+    let host = start_host().await;
+    let mut ws = connect(host.addr).await;
+    handshake(&mut ws).await;
+    match next_any_message(&mut ws).await {
+        Some(Message::HostInfo(info)) => {
+            assert_eq!(info.os, tether_protocol::host_os::current());
+            assert_eq!(info.name, "test-host");
+            assert!(!info.version.is_empty());
+        }
+        other => panic!("expected HostInfo, got {other:?}"),
+    }
+}
+
+/// A file uploaded over the LAN transport lands, byte-identical, in the
+/// configured folder; a download of it comes back the same.
+#[tokio::test]
+async fn file_upload_and_download_over_lan() {
+    use tether_protocol::{FileAccept, FileChunk, FileEnd, FileOffer, FileRequest, FileStatus};
+    let host = start_host().await;
+    let dir = std::env::temp_dir().join("tether-test-uploads");
+    let mut ws = connect(host.addr).await;
+    handshake(&mut ws).await;
+
+    let name = format!("lan-upload-{}.bin", std::process::id());
+    let content: Vec<u8> = (0..40_000u32).map(|i| (i * 7) as u8).collect();
+    send_msg(
+        &mut ws,
+        &Message::FileOffer(FileOffer {
+            transfer_id: 1,
+            size: content.len() as u64,
+            name: name.clone(),
+        }),
+    )
+    .await;
+    match next_message(&mut ws).await {
+        Some(Message::FileAccept(a)) => assert!(a.ok, "refused: {}", a.reason),
+        other => panic!("expected FileAccept, got {other:?}"),
+    }
+    for (seq, part) in content.chunks(tether_protocol::FILE_CHUNK_LEN).enumerate() {
+        send_msg(
+            &mut ws,
+            &Message::FileChunk(FileChunk {
+                transfer_id: 1,
+                seq: seq as u32,
+                data: Bytes::copy_from_slice(part),
+            }),
+        )
+        .await;
+    }
+    send_msg(
+        &mut ws,
+        &Message::FileEnd(FileEnd {
+            transfer_id: 1,
+            status: FileStatus::Complete,
+        }),
+    )
+    .await;
+    match next_message(&mut ws).await {
+        Some(Message::FileEnd(e)) => assert_eq!(e.status, FileStatus::Complete),
+        other => panic!("expected FileEnd, got {other:?}"),
+    }
+    let saved = dir.join(&name);
+    assert_eq!(std::fs::read(&saved).unwrap(), content);
+
+    // and back down again
+    send_msg(
+        &mut ws,
+        &Message::FileRequest(FileRequest {
+            transfer_id: 2,
+            path: saved.to_string_lossy().into_owned(),
+        }),
+    )
+    .await;
+    match next_message(&mut ws).await {
+        Some(Message::FileOffer(o)) => assert_eq!((o.size, o.name), (content.len() as u64, name)),
+        other => panic!("expected FileOffer, got {other:?}"),
+    }
+    send_msg(
+        &mut ws,
+        &Message::FileAccept(FileAccept {
+            transfer_id: 2,
+            ok: true,
+            reason: String::new(),
+        }),
+    )
+    .await;
+    let mut got = Vec::new();
+    loop {
+        match next_message(&mut ws).await {
+            Some(Message::FileChunk(c)) => got.extend_from_slice(&c.data),
+            Some(Message::FileEnd(e)) => {
+                assert_eq!(e.status, FileStatus::Complete);
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(got, content);
+    let _ = std::fs::remove_file(&saved);
 }

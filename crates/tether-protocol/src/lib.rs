@@ -51,12 +51,36 @@ mod msg_type {
     pub const AUTH_RESULT: u8 = 0x0A;
     pub const DISPLAYS: u8 = 0x0B;
     pub const SELECT_DISPLAY: u8 = 0x0C;
+    pub const HOST_INFO: u8 = 0x0D;
+    pub const FILE_OFFER: u8 = 0x0E;
+    pub const FILE_ACCEPT: u8 = 0x0F;
+    pub const FILE_CHUNK: u8 = 0x10;
+    pub const FILE_END: u8 = 0x11;
+    pub const FILE_REQUEST: u8 = 0x12;
 }
+
+/// Longest file name a `FileOffer` may carry (bytes, UTF-8). Every common
+/// filesystem caps a single path component at 255.
+pub const MAX_FILE_NAME_LEN: usize = 255;
+/// Longest host path a `FileRequest` may name (bytes, UTF-8).
+pub const MAX_FILE_PATH_LEN: usize = 4096;
+/// Largest `FileChunk` payload receivers accept (webrtc-rs drops
+/// data-channel messages over 64 KiB). Senders use [`FILE_CHUNK_LEN`].
+pub const MAX_FILE_CHUNK_LEN: usize = 60 * 1024;
+/// The chunk size senders use: one encoded `FileChunk` (13 bytes of framing)
+/// then fits a single 16 KiB `tether-bulk` data-channel message, and never
+/// holds up the control traffic sharing its transport for long.
+pub const FILE_CHUNK_LEN: usize = 16 * 1024 - 64;
 
 /// Capability bit: this peer can be controlled (host path exists).
 pub const CAP_CAN_HOST: u8 = 0b01;
 /// Capability bit: this peer can control others.
 pub const CAP_CAN_CONTROL: u8 = 0b10;
+/// Capability bit: this peer can receive (controller) or send (host) system
+/// audio as a WebRTC audio track.
+pub const CAP_AUDIO: u8 = 0b100;
+/// Capability bit: this peer speaks the file-transfer messages (0x0E-0x12).
+pub const CAP_FILES: u8 = 0b1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -264,6 +288,111 @@ pub struct SelectDisplay {
 /// Cap on displays in one `Displays` message (a u8 count; nobody has 255).
 pub const MAX_DISPLAYS: usize = 64;
 
+/// `HostInfo.os` values.
+pub mod host_os {
+    pub const UNKNOWN: u8 = 0;
+    pub const MACOS: u8 = 1;
+    pub const WINDOWS: u8 = 2;
+    pub const LINUX: u8 = 3;
+
+    /// The OS this binary was built for, as the signal directory spells it.
+    pub const fn name() -> &'static str {
+        match current() {
+            MACOS => "macos",
+            WINDOWS => "windows",
+            LINUX => "linux",
+            _ => "",
+        }
+    }
+
+    /// The OS this binary was built for.
+    pub const fn current() -> u8 {
+        if cfg!(target_os = "macos") {
+            MACOS
+        } else if cfg!(windows) {
+            WINDOWS
+        } else if cfg!(target_os = "linux") {
+            LINUX
+        } else {
+            UNKNOWN
+        }
+    }
+}
+
+/// Host → controller, once after the handshake: what the host is. The
+/// controller uses `os` for its modifier policy (Cmd → Ctrl against a
+/// Windows host) and shows `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostInfo {
+    pub os: u8,
+    pub version: String,
+    pub name: String,
+}
+
+/// Either direction: offer a file. `name` is a bare file name, never a path;
+/// the receiver chooses where it lands. The controller allocates every
+/// `transfer_id` (its uploads, and the ids in its `FileRequest`s), so ids are
+/// unique per session in both directions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOffer {
+    pub transfer_id: u32,
+    pub size: u64,
+    pub name: String,
+}
+
+/// Reply to a `FileOffer`: accepted, or refused with a human-readable reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileAccept {
+    pub transfer_id: u32,
+    pub ok: bool,
+    pub reason: String,
+}
+
+/// One slice of an accepted transfer, in order (`seq` starts at 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChunk {
+    pub transfer_id: u32,
+    pub seq: u32,
+    pub data: Bytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStatus {
+    /// Sender: every chunk has been sent. Receiver: the file was saved.
+    Complete = 0,
+    /// Either side gave up on purpose.
+    Cancelled = 1,
+    /// Either side failed (I/O error, size mismatch, ...).
+    Error = 2,
+}
+
+impl FileStatus {
+    fn from_u8(v: u8) -> Result<Self, DecodeError> {
+        match v {
+            0 => Ok(FileStatus::Complete),
+            1 => Ok(FileStatus::Cancelled),
+            2 => Ok(FileStatus::Error),
+            _ => Err(DecodeError::InvalidValue("file status")),
+        }
+    }
+}
+
+/// Ends a transfer, from either side: the single teardown path for success,
+/// cancellation and failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileEnd {
+    pub transfer_id: u32,
+    pub status: FileStatus,
+}
+
+/// Controller → host: send me the file at this host path. The host answers
+/// with a `FileOffer` carrying the same id, or a `FileEnd` error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRequest {
+    pub transfer_id: u32,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Hello(Hello),
@@ -278,6 +407,12 @@ pub enum Message {
     AuthResult(AuthResult),
     Displays(Displays),
     SelectDisplay(SelectDisplay),
+    HostInfo(HostInfo),
+    FileOffer(FileOffer),
+    FileAccept(FileAccept),
+    FileChunk(FileChunk),
+    FileEnd(FileEnd),
+    FileRequest(FileRequest),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -382,6 +517,43 @@ impl Message {
                 buf.put_u8(msg_type::SELECT_DISPLAY);
                 buf.put_u32_le(s.id);
             }
+            Message::HostInfo(h) => {
+                buf.put_u8(msg_type::HOST_INFO);
+                buf.put_u8(h.os);
+                put_field(&mut buf, h.version.as_bytes());
+                put_field(&mut buf, h.name.as_bytes());
+            }
+            Message::FileOffer(f) => {
+                debug_assert!(f.name.len() <= MAX_FILE_NAME_LEN);
+                buf.put_u8(msg_type::FILE_OFFER);
+                buf.put_u32_le(f.transfer_id);
+                buf.put_u64_le(f.size);
+                put_field(&mut buf, f.name.as_bytes());
+            }
+            Message::FileAccept(f) => {
+                buf.put_u8(msg_type::FILE_ACCEPT);
+                buf.put_u32_le(f.transfer_id);
+                buf.put_u8(f.ok as u8);
+                put_field(&mut buf, f.reason.as_bytes());
+            }
+            Message::FileChunk(f) => {
+                debug_assert!(f.data.len() <= MAX_FILE_CHUNK_LEN);
+                buf.put_u8(msg_type::FILE_CHUNK);
+                buf.put_u32_le(f.transfer_id);
+                buf.put_u32_le(f.seq);
+                buf.put_slice(&f.data);
+            }
+            Message::FileEnd(f) => {
+                buf.put_u8(msg_type::FILE_END);
+                buf.put_u32_le(f.transfer_id);
+                buf.put_u8(f.status as u8);
+            }
+            Message::FileRequest(f) => {
+                debug_assert!(f.path.len() <= MAX_FILE_PATH_LEN);
+                buf.put_u8(msg_type::FILE_REQUEST);
+                buf.put_u32_le(f.transfer_id);
+                buf.put_slice(f.path.as_bytes());
+            }
         }
         let total_len = (buf.len() - 4) as u32;
         buf[0..4].copy_from_slice(&total_len.to_le_bytes());
@@ -391,6 +563,8 @@ impl Message {
     fn encoded_payload_hint(&self) -> usize {
         match self {
             Message::FrameData(f) => 14 + f.payload.len(),
+            Message::FileChunk(f) => 9 + f.data.len(),
+            Message::FileRequest(f) => 5 + f.path.len(),
             _ => 64,
         }
     }
@@ -430,6 +604,12 @@ impl Message {
             msg_type::SELECT_DISPLAY => {
                 Message::SelectDisplay(decode_select_display(payload, msg_type)?)
             }
+            msg_type::HOST_INFO => Message::HostInfo(decode_host_info(payload, msg_type)?),
+            msg_type::FILE_OFFER => Message::FileOffer(decode_file_offer(payload, msg_type)?),
+            msg_type::FILE_ACCEPT => Message::FileAccept(decode_file_accept(payload, msg_type)?),
+            msg_type::FILE_CHUNK => Message::FileChunk(decode_file_chunk(payload, msg_type)?),
+            msg_type::FILE_END => Message::FileEnd(decode_file_end(payload, msg_type)?),
+            msg_type::FILE_REQUEST => Message::FileRequest(decode_file_request(payload, msg_type)?),
             other => {
                 return Ok(Decoded::Unknown {
                     msg_type: other,
@@ -557,6 +737,103 @@ fn decode_select_display(p: &[u8], t: u8) -> Result<SelectDisplay, DecodeError> 
     }
     Ok(SelectDisplay {
         id: u32::from_le_bytes([p[0], p[1], p[2], p[3]]),
+    })
+}
+
+fn decode_host_info(p: &[u8], t: u8) -> Result<HostInfo, DecodeError> {
+    if p.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    let os = p[0];
+    let mut rest = &p[1..];
+    let version = take_str(&mut rest, t)?;
+    let name = take_str(&mut rest, t)?;
+    if !rest.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(HostInfo { os, version, name })
+}
+
+fn le_u32(p: &[u8]) -> u32 {
+    u32::from_le_bytes([p[0], p[1], p[2], p[3]])
+}
+
+fn decode_file_offer(p: &[u8], t: u8) -> Result<FileOffer, DecodeError> {
+    if p.len() < 12 {
+        return Err(DecodeError::BadLength(t));
+    }
+    let transfer_id = le_u32(p);
+    let size = u64::from_le_bytes(p[4..12].try_into().expect("8 bytes"));
+    let mut rest = &p[12..];
+    let name = take_str(&mut rest, t)?;
+    if !rest.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    if name.len() > MAX_FILE_NAME_LEN {
+        return Err(DecodeError::InvalidValue("file name too long"));
+    }
+    Ok(FileOffer {
+        transfer_id,
+        size,
+        name,
+    })
+}
+
+fn decode_file_accept(p: &[u8], t: u8) -> Result<FileAccept, DecodeError> {
+    if p.len() < 5 {
+        return Err(DecodeError::BadLength(t));
+    }
+    let transfer_id = le_u32(p);
+    let ok = p[4] != 0;
+    let mut rest = &p[5..];
+    let reason = take_str(&mut rest, t)?;
+    if !rest.is_empty() {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(FileAccept {
+        transfer_id,
+        ok,
+        reason,
+    })
+}
+
+fn decode_file_chunk(p: &[u8], t: u8) -> Result<FileChunk, DecodeError> {
+    if p.len() < 8 {
+        return Err(DecodeError::BadLength(t));
+    }
+    if p.len() - 8 > MAX_FILE_CHUNK_LEN {
+        return Err(DecodeError::InvalidValue("file chunk too large"));
+    }
+    Ok(FileChunk {
+        transfer_id: le_u32(p),
+        seq: le_u32(&p[4..]),
+        data: Bytes::copy_from_slice(&p[8..]),
+    })
+}
+
+fn decode_file_end(p: &[u8], t: u8) -> Result<FileEnd, DecodeError> {
+    if p.len() != 5 {
+        return Err(DecodeError::BadLength(t));
+    }
+    Ok(FileEnd {
+        transfer_id: le_u32(p),
+        status: FileStatus::from_u8(p[4])?,
+    })
+}
+
+fn decode_file_request(p: &[u8], t: u8) -> Result<FileRequest, DecodeError> {
+    if p.len() < 4 {
+        return Err(DecodeError::BadLength(t));
+    }
+    if p.len() - 4 > MAX_FILE_PATH_LEN {
+        return Err(DecodeError::InvalidValue("file path too long"));
+    }
+    let path = std::str::from_utf8(&p[4..])
+        .map_err(|_| DecodeError::InvalidValue("file path not UTF-8"))?
+        .to_owned();
+    Ok(FileRequest {
+        transfer_id: le_u32(p),
+        path,
     })
 }
 
@@ -844,6 +1121,39 @@ mod tests {
                 ],
             }),
             Message::SelectDisplay(SelectDisplay { id: 2 }),
+            Message::HostInfo(HostInfo {
+                os: host_os::WINDOWS,
+                version: "0.1.0".into(),
+                name: "desk-pc".into(),
+            }),
+            Message::FileOffer(FileOffer {
+                transfer_id: 7,
+                size: 5_000_000_000,
+                name: "report final (2).pdf".into(),
+            }),
+            Message::FileAccept(FileAccept {
+                transfer_id: 7,
+                ok: false,
+                reason: "not enough disk space".into(),
+            }),
+            Message::FileChunk(FileChunk {
+                transfer_id: 7,
+                seq: 3,
+                data: Bytes::from_static(&[1, 2, 3]),
+            }),
+            Message::FileChunk(FileChunk {
+                transfer_id: 1,
+                seq: 0,
+                data: Bytes::new(),
+            }),
+            Message::FileEnd(FileEnd {
+                transfer_id: 7,
+                status: FileStatus::Cancelled,
+            }),
+            Message::FileRequest(FileRequest {
+                transfer_id: 9,
+                path: "C:/Users/me/Desktop/notes.txt".into(),
+            }),
         ]
     }
 
@@ -1050,6 +1360,104 @@ mod tests {
                 1, 0,    // name_len = 1
                 0x58, // "X"
             ]
+        );
+    }
+
+    /// Cross-implementation vectors for the Phase 7/11 messages; the same
+    /// bytes are pinned in controller/src/protocol.test.ts.
+    #[test]
+    fn host_info_and_file_transfer_vectors() {
+        let host_info = Message::HostInfo(HostInfo {
+            os: host_os::WINDOWS,
+            version: "1".into(),
+            name: "pc".into(),
+        });
+        assert_eq!(
+            &host_info.encode()[..],
+            &[9, 0, 0, 0, 0x0D, 2, 1, 0, 0x31, 2, 0, 0x70, 0x63]
+        );
+
+        let offer = Message::FileOffer(FileOffer {
+            transfer_id: 1,
+            size: 0x0102,
+            name: "a".into(),
+        });
+        assert_eq!(
+            &offer.encode()[..],
+            &[
+                16, 0, 0, 0, 0x0E, 1, 0, 0, 0, 0x02, 0x01, 0, 0, 0, 0, 0, 0, 1, 0, 0x61
+            ]
+        );
+
+        let accept = Message::FileAccept(FileAccept {
+            transfer_id: 1,
+            ok: true,
+            reason: String::new(),
+        });
+        assert_eq!(
+            &accept.encode()[..],
+            &[8, 0, 0, 0, 0x0F, 1, 0, 0, 0, 1, 0, 0]
+        );
+
+        let chunk = Message::FileChunk(FileChunk {
+            transfer_id: 1,
+            seq: 2,
+            data: Bytes::from_static(&[0xAB]),
+        });
+        assert_eq!(
+            &chunk.encode()[..],
+            &[10, 0, 0, 0, 0x10, 1, 0, 0, 0, 2, 0, 0, 0, 0xAB]
+        );
+
+        let end = Message::FileEnd(FileEnd {
+            transfer_id: 1,
+            status: FileStatus::Error,
+        });
+        assert_eq!(&end.encode()[..], &[6, 0, 0, 0, 0x11, 1, 0, 0, 0, 2]);
+
+        let request = Message::FileRequest(FileRequest {
+            transfer_id: 1,
+            path: "/a".into(),
+        });
+        assert_eq!(
+            &request.encode()[..],
+            &[7, 0, 0, 0, 0x12, 1, 0, 0, 0, 0x2F, 0x61]
+        );
+    }
+
+    #[test]
+    fn file_messages_reject_hostile_lengths() {
+        let mut long_name = BytesMut::new();
+        let name = vec![b'n'; MAX_FILE_NAME_LEN + 1];
+        long_name.put_u32_le((1 + 12 + 2 + name.len()) as u32);
+        long_name.put_u8(msg_type::FILE_OFFER);
+        long_name.put_u32_le(1);
+        long_name.put_u64_le(1);
+        long_name.put_u16_le(name.len() as u16);
+        long_name.put_slice(&name);
+        assert_eq!(
+            Message::decode(&long_name),
+            Err(DecodeError::InvalidValue("file name too long"))
+        );
+
+        let mut big_chunk = BytesMut::new();
+        big_chunk.put_u32_le((1 + 8 + MAX_FILE_CHUNK_LEN + 1) as u32);
+        big_chunk.put_u8(msg_type::FILE_CHUNK);
+        big_chunk.put_u64_le(0);
+        big_chunk.put_slice(&vec![0; MAX_FILE_CHUNK_LEN + 1]);
+        assert_eq!(
+            Message::decode(&big_chunk),
+            Err(DecodeError::InvalidValue("file chunk too large"))
+        );
+
+        let mut bad_status = BytesMut::new();
+        bad_status.put_u32_le(6);
+        bad_status.put_u8(msg_type::FILE_END);
+        bad_status.put_u32_le(1);
+        bad_status.put_u8(9);
+        assert_eq!(
+            Message::decode(&bad_status),
+            Err(DecodeError::InvalidValue("file status"))
         );
     }
 

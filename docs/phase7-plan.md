@@ -223,6 +223,4 @@ outbound-only and needs nothing.
 
 ---
 
-**Status: planned, not started. Blocked on Phase 6 for anything requiring
-remote reachability, though the platform modules can be built and tested over
-LAN first.**
+**Status: done — see [phase7-gate-results.md](phase7-gate-results.md).**

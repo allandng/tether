@@ -117,6 +117,7 @@ async fn register_as(
             auth: SECRET.into(),
             pubkey,
             sig,
+            os: String::new(),
         },
     )
     .await;
@@ -229,6 +230,7 @@ async fn bad_secret_is_refused() {
             auth: "wrong".into(),
             pubkey: None,
             sig: None,
+            os: String::new(),
         },
     )
     .await;
@@ -433,6 +435,7 @@ async fn a_captured_signature_does_not_replay_onto_a_new_connection() {
             auth: SECRET.into(),
             pubkey: Some(pubkey),
             sig: Some(sig),
+            os: String::new(),
         },
     )
     .await;

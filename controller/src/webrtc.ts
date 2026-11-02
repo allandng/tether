@@ -12,10 +12,10 @@
 // introduces us.
 
 import { FrameReassembler, chunkFrame } from "./chunks";
-import type { ConnectionEvents, Transport } from "./connection";
+import { type ConnectionEvents, FILE_HIGH_WATER, type Transport } from "./connection";
 import { loadOrCreateIdentity } from "./identity";
 import { channelBinding, sdpFingerprint, tokenStore } from "./pairing";
-import { encodeClipboardData, type InputEvent } from "./protocol";
+import { type FileMessage, type InputEvent, encodeClipboardData, encodeMessage } from "./protocol";
 import { type AuthContext, ProtocolSession } from "./session";
 import { SignalingClient } from "./signaling";
 
@@ -73,6 +73,8 @@ export class WebRtcTransport implements Transport {
         onFrame: (f) => this.events.onFrame(f),
         onClipboard: (text) => this.events.onClipboard(text),
         onDisplays: (d) => this.events.onDisplays(d),
+        onHostInfo: (i) => this.events.onHostInfo(i),
+        onFileMessage: (m) => this.events.onFileMessage(m),
         onPairingRequired: () => this.events.onPairingRequired(),
         onPairingFailed: () => this.events.onPairingFailed(),
         onProtocolError: (detail) => this.fail(detail, true),
@@ -83,8 +85,26 @@ export class WebRtcTransport implements Transport {
         if (this.ctl?.readyState === "open") this.ctl.send(bytes as Uint8Array<ArrayBuffer>);
       },
       authCtx,
+      true, // WebRTC can carry the host's audio track
     );
     this.session = session;
+
+    // System audio (Phase 10): a receive-only audio m-line for the host to
+    // answer on. A host without --audio (or an older host) simply never sends
+    // a track; the video data channels are unaffected either way.
+    pc.addTransceiver("audio", { direction: "recvonly" });
+    pc.ontrack = (e) => {
+      if (e.track.kind !== "audio") return;
+      const stream = e.streams[0] ?? new MediaStream([e.track]);
+      // The browser surfaces a track for our recvonly transceiver even when
+      // the host sends nothing (no --audio); offer the speaker only once
+      // audio actually flows, which is when the track unmutes.
+      if (!e.track.muted) {
+        this.events.onAudioTrack?.(stream);
+      } else {
+        e.track.addEventListener("unmute", () => this.events.onAudioTrack?.(stream), { once: true });
+      }
+    };
 
     const ctl = pc.createDataChannel("tether-ctl", { ordered: true });
     ctl.binaryType = "arraybuffer";
@@ -109,6 +129,7 @@ export class WebRtcTransport implements Transport {
 
     const bulk = pc.createDataChannel("tether-bulk", { ordered: true });
     bulk.binaryType = "arraybuffer";
+    bulk.bufferedAmountLowThreshold = FILE_HIGH_WATER / 4;
     this.bulk = bulk;
     bulk.onmessage = (e) => {
       if (!(e.data instanceof ArrayBuffer)) return;
@@ -206,12 +227,35 @@ export class WebRtcTransport implements Transport {
   sendClipboard(text: string): void {
     // Always via the bulk channel: a single data-channel message caps out
     // around 64 KiB, and clipboard may be up to 256 KiB.
+    this.sendBulk(encodeClipboardData({ text }));
+  }
+
+  sendFile(msg: FileMessage): void {
+    this.sendBulk(encodeMessage(msg));
+  }
+
+  /** One message's chunks go out back to back under one bulk sequence
+   * number: the host's reassembler is latest-wins per sequence. */
+  private sendBulk(wire: Uint8Array): void {
     if (!this.connected || this.bulk?.readyState !== "open") return;
     this.bulkSeq = (this.bulkSeq + 1) >>> 0;
-    const wire = encodeClipboardData({ text });
     for (const chunk of chunkFrame(this.bulkSeq, wire)) {
       this.bulk.send(chunk as Uint8Array<ArrayBuffer>);
     }
+  }
+
+  drainFiles(): Promise<void> {
+    const bulk = this.bulk;
+    if (!bulk || bulk.bufferedAmount <= FILE_HIGH_WATER) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        bulk.removeEventListener("bufferedamountlow", done);
+        bulk.removeEventListener("close", done);
+        resolve();
+      };
+      bulk.addEventListener("bufferedamountlow", done);
+      bulk.addEventListener("close", done);
+    });
   }
 
   sendText(text: string): void {

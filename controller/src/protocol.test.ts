@@ -5,7 +5,13 @@ import {
   type Message,
   PROTOCOL_VERSION,
   Role,
+  MAX_FILE_CHUNK_LEN,
   decodeMessage,
+  encodeFileAccept,
+  encodeFileChunk,
+  encodeFileEnd,
+  encodeFileOffer,
+  encodeFileRequest,
   encodeMessage,
 } from "./protocol";
 
@@ -220,5 +226,64 @@ describe("rejects corrupt input", () => {
 
   it("oversized text input refused on encode", () => {
     expect(() => encodeMessage({ type: "text", text: "x".repeat(1025) })).toThrow();
+  });
+});
+
+describe("HostInfo + file transfer (Phase 7/11) cross-implementation vectors", () => {
+  // Same bytes as host_info_and_file_transfer_vectors in crates/tether-protocol.
+  const hex = (b: Uint8Array) => Array.from(b);
+
+  it("HostInfo decodes", () => {
+    const r = decodeMessage(new Uint8Array([9, 0, 0, 0, 0x0d, 2, 1, 0, 0x31, 2, 0, 0x70, 0x63]));
+    expect(r).toEqual({ ok: true, message: { type: "host_info", os: 2, version: "1", name: "pc" } });
+  });
+
+  it("FileOffer encodes and decodes", () => {
+    const wire = [16, 0, 0, 0, 0x0e, 1, 0, 0, 0, 0x02, 0x01, 0, 0, 0, 0, 0, 0, 1, 0, 0x61];
+    expect(hex(encodeFileOffer({ transferId: 1, size: 0x0102, name: "a" }))).toEqual(wire);
+    expect(decodeMessage(new Uint8Array(wire))).toEqual({
+      ok: true,
+      message: { type: "file_offer", transferId: 1, size: 0x0102, name: "a" },
+    });
+  });
+
+  it("FileAccept encodes and decodes", () => {
+    const wire = [8, 0, 0, 0, 0x0f, 1, 0, 0, 0, 1, 0, 0];
+    expect(hex(encodeFileAccept({ transferId: 1, ok: true, reason: "" }))).toEqual(wire);
+    expect(decodeMessage(new Uint8Array(wire))).toEqual({
+      ok: true,
+      message: { type: "file_accept", transferId: 1, ok: true, reason: "" },
+    });
+  });
+
+  it("FileChunk encodes and decodes", () => {
+    const wire = [10, 0, 0, 0, 0x10, 1, 0, 0, 0, 2, 0, 0, 0, 0xab];
+    expect(hex(encodeFileChunk({ transferId: 1, seq: 2, data: new Uint8Array([0xab]) }))).toEqual(wire);
+    const r = decodeMessage(new Uint8Array(wire));
+    expect(r.ok && r.message.type === "file_chunk" && Array.from(r.message.data)).toEqual([0xab]);
+  });
+
+  it("FileEnd encodes and decodes", () => {
+    const wire = [6, 0, 0, 0, 0x11, 1, 0, 0, 0, 2];
+    expect(hex(encodeFileEnd({ transferId: 1, status: 2 }))).toEqual(wire);
+    expect(decodeMessage(new Uint8Array(wire))).toEqual({
+      ok: true,
+      message: { type: "file_end", transferId: 1, status: 2 },
+    });
+  });
+
+  it("FileRequest encodes", () => {
+    expect(hex(encodeFileRequest({ transferId: 1, path: "/a" }))).toEqual([
+      7, 0, 0, 0, 0x12, 1, 0, 0, 0, 0x2f, 0x61,
+    ]);
+  });
+
+  it("rejects hostile file messages", () => {
+    const badStatus = decodeMessage(new Uint8Array([6, 0, 0, 0, 0x11, 1, 0, 0, 0, 9]));
+    expect(badStatus.ok).toBe(false);
+    const big = new Uint8Array(4 + 1 + 8 + MAX_FILE_CHUNK_LEN + 1);
+    new DataView(big.buffer).setUint32(0, big.length - 4, true);
+    big[4] = 0x10;
+    expect(decodeMessage(big).ok).toBe(false);
   });
 });

@@ -146,5 +146,4 @@ remote-control host.
 
 ---
 
-**Status: planned, not started. Depends on Phase 7 for the Windows half; the
-macOS half depends only on Phase 6.**
+**Status: done — see [phase9-gate-results.md](phase9-gate-results.md).**

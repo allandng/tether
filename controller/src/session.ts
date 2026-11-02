@@ -3,9 +3,13 @@
 // transport. Owns no socket — callers feed bytes in and provide a byte sink.
 
 import {
+  CAP_AUDIO,
   CAP_CAN_CONTROL,
+  CAP_FILES,
   type DisplayInfo,
+  type FileMessage,
   type FrameData,
+  type HostInfo,
   type InputEvent,
   type Resolution,
   PROTOCOL_VERSION,
@@ -40,6 +44,10 @@ export interface SessionEvents {
   onFrame(frame: FrameData): void;
   onClipboard(text: string): void;
   onDisplays(displays: DisplayInfo[]): void;
+  /** What the host is (older hosts never send it). */
+  onHostInfo(info: HostInfo): void;
+  /** A file-transfer message from the host. */
+  onFileMessage(msg: FileMessage): void;
   /** Host rejected our token (or we have none) — the user must enter the
    * host's pairing code. Call `submitPairingCode` to proceed. */
   onPairingRequired(): void;
@@ -59,6 +67,8 @@ export class ProtocolSession {
     private readonly events: SessionEvents,
     private readonly sendBytes: (bytes: Uint8Array) => void,
     private readonly auth: AuthContext,
+    /** True on transports that can receive an audio track (WebRTC). */
+    private readonly canPlayAudio = false,
   ) {}
 
   /** Call when the transport is ready to carry bytes: sends our Hello. */
@@ -69,7 +79,7 @@ export class ProtocolSession {
       encodeHello({
         version: PROTOCOL_VERSION,
         role: Role.Controller,
-        capabilities: CAP_CAN_CONTROL,
+        capabilities: CAP_CAN_CONTROL | CAP_FILES | (this.canPlayAudio ? CAP_AUDIO : 0),
       }),
     );
   }
@@ -209,6 +219,16 @@ export class ProtocolSession {
             break;
           case "displays":
             this.events.onDisplays(message.displays);
+            break;
+          case "host_info":
+            this.events.onHostInfo(message);
+            break;
+          case "file_offer":
+          case "file_accept":
+          case "file_chunk":
+          case "file_end":
+          case "file_request":
+            this.events.onFileMessage(message);
             break;
           default:
             console.warn("unexpected message from host:", message.type);

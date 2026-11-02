@@ -1,0 +1,52 @@
+#!/bin/sh
+# pkg postinstall: install the LaunchAgent for the user at the console and
+# start it in their GUI session. Runs as root, but every write inside the
+# user's home is done as that user, so a planted symlink can't turn it into
+# a root write.
+set -eu
+
+PLIST_NAME=com.tether.daemon.plist
+SRC="/usr/local/share/tether/$PLIST_NAME"
+
+console_user=$(stat -f%Su /dev/console)
+if [ -z "$console_user" ] || [ "$console_user" = "root" ] || [ "$console_user" = "loginwindow" ]; then
+  echo "No user logged in at the console; reinstall the package while logged in to set up the LaunchAgent."
+  exit 0
+fi
+uid=$(id -u "$console_user")
+# dscl prints "NFSHomeDirectory: /path", or the key alone with the value on
+# the next line when it contains spaces; handle both.
+home=$(dscl . -read "/Users/$console_user" NFSHomeDirectory |
+  sed -e '1s/^NFSHomeDirectory:[[:space:]]*//' -e '/^$/d' -e 's/^ //')
+case "$home" in
+  /*) ;;
+  *) echo "Could not find the home directory of $console_user." >&2; exit 1 ;;
+esac
+agents="$home/Library/LaunchAgents"
+logs="$home/Library/Logs/Tether"
+dst="$agents/$PLIST_NAME"
+
+as_user() { sudo -u "$console_user" -- "$@"; }
+
+as_user mkdir -p "$agents" "$logs"
+
+# launchd doesn't expand ~: fill in the home path (escaped for XML, then for
+# sed). Write a temp file and rename it over the destination, which replaces
+# a symlink there rather than following it.
+home_xml=$(printf '%s' "$home" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+home_sed=$(printf '%s' "$home_xml" | sed -e 's/[\\|&]/\\&/g')
+tmp=$(as_user mktemp "$agents/.$PLIST_NAME.XXXXXX")
+sed "s|__HOME__|$home_sed|g" "$SRC" | as_user tee "$tmp" >/dev/null
+as_user chmod 644 "$tmp"
+as_user mv -f "$tmp" "$dst"
+
+# Reload if an older version is running.
+launchctl bootout "gui/$uid/com.tether.daemon" 2>/dev/null || true
+if [ -f "$home/.config/tether/config.toml" ]; then
+  launchctl bootstrap "gui/$uid" "$dst"
+else
+  echo "Tether installed. Finish setup in Terminal:"
+  echo "  tetherd setup --signal wss://your-server/ws"
+  echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/$PLIST_NAME"
+fi
+exit 0

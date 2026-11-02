@@ -1,15 +1,22 @@
 //! Module 3 smoke test: capture the main display for ~3 seconds, report the
-//! achieved fps, and write the last frame to /tmp/tether_capture_smoke.jpg.
+//! achieved fps, and write the last frame to `<temp>/tether_capture_smoke.jpg`.
 //!
 //! Run: cargo run -p tetherd --example capture_smoke
-//! Requires Screen Recording permission for the invoking terminal.
+//! macOS: requires Screen Recording permission for the invoking terminal.
+//! Windows: run from an interactive desktop session (not over SSH).
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn main() -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
     use tetherd::capture::{FrameEncoder, ScreenCapturer};
 
+    #[cfg(target_os = "macos")]
     let mut capturer = tetherd::capture::macos::SckCapturer::main_display(30)?;
+    #[cfg(windows)]
+    let mut capturer = {
+        tetherd::win::init_dpi_awareness();
+        tetherd::capture::windows::DxgiCapturer::primary(30)?
+    };
     let mut encoder = tetherd::encode::JpegEncoder::new(75)?;
     let resolution = capturer.resolution();
     println!("capturing {}x{} ...", resolution.width, resolution.height);
@@ -35,13 +42,14 @@ fn main() -> anyhow::Result<()> {
         last_jpeg.as_ref().map(|j| j.len() / 1024).unwrap_or(0),
     );
     if let Some(jpeg) = last_jpeg {
-        std::fs::write("/tmp/tether_capture_smoke.jpg", &jpeg)?;
-        println!("wrote /tmp/tether_capture_smoke.jpg");
+        let path = std::env::temp_dir().join("tether_capture_smoke.jpg");
+        std::fs::write(&path, &jpeg)?;
+        println!("wrote {}", path.display());
     }
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {
-    eprintln!("capture_smoke is macOS-only");
+    eprintln!("capture_smoke supports macOS and Windows only");
 }

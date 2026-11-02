@@ -1,4 +1,3 @@
-use clap::Parser;
 use tetherd::config::Args;
 use tetherd::input::InjectCommand;
 use tetherd::server::{Server, ServerState};
@@ -32,16 +31,23 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // colour only for a person at a terminal, never in a service log file
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
-    let args = Args::parse();
+    #[cfg(windows)]
+    tetherd::win::init_dpi_awareness();
+
+    let args = Args::load()?;
     if let Some(command) = &args.command {
-        return run_command(command);
+        return run_command(command, &args).await;
     }
     args.validate().map_err(anyhow::Error::msg)?;
+    #[cfg(target_os = "macos")]
+    tetherd::macos_perms::check();
 
     let pipeline = start_capture(args.codec, args.bitrate_kbps)?;
     let (input_tx, input_rx) = mpsc::channel(256);
@@ -74,6 +80,31 @@ async fn main() -> anyhow::Result<()> {
     let identity_seed = pairing.signal_identity_seed();
     let auth = std::sync::Arc::new(tokio::sync::Mutex::new(pairing));
 
+    // System audio, opt-in. Unavailable (no device, unsupported platform) is
+    // a warning, not a startup failure: video still works.
+    let audio = if args.audio {
+        match tetherd::audio::start_platform() {
+            Ok(feed) => {
+                info!("system audio enabled (WebRTC controllers only)");
+                Some(feed)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "--audio requested but unavailable; continuing without");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let host_name = args
+        .device_id
+        .clone()
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+    let upload_dir = args
+        .upload_dir
+        .clone()
+        .unwrap_or_else(tetherd::files::FileConfig::default_dir);
+    tetherd::files::sweep_stale_parts(&upload_dir);
     let state = ServerState {
         resolution: pipeline.resolution,
         frames: pipeline.frames,
@@ -92,7 +123,37 @@ async fn main() -> anyhow::Result<()> {
         )),
         displays: pipeline.displays,
         select_display: pipeline.select_display,
+        host_name: host_name.clone().into(),
+        files: std::sync::Arc::new(tetherd::files::FileConfig {
+            dir: upload_dir,
+            max_upload_bytes: args.max_upload_mb.saturating_mul(1024 * 1024),
+        }),
+        audio,
     };
+
+    // Local control channel: `tetherd pair` / `tetherd status` against this
+    // daemon. Failing to open it (another daemon owns it) is not fatal.
+    let mut transports = Vec::new();
+    if let Some(bind) = args.bind {
+        transports.push(format!("lan {bind}:{}", args.port));
+    }
+    if let Some(url) = args.signal_url() {
+        transports.push(format!("webrtc via {url}"));
+    }
+    let control = tetherd::control::ControlContext {
+        auth: state.auth.clone(),
+        slots: state.controller_slots.clone(),
+        max_controllers: args.max_controllers.max(1),
+        displays: state.displays.clone(),
+        device_id: host_name.clone(),
+        transports,
+        audio: state.audio.is_some(),
+    };
+    tokio::spawn(async move {
+        if let Err(e) = tetherd::control::serve(control).await {
+            tracing::warn!(error = %e, "control channel unavailable; `tetherd pair` won't reach this daemon");
+        }
+    });
 
     let lan = match args.bind {
         Some(bind) => {
@@ -105,10 +166,7 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let rtc = match args.signal_url() {
         Some(signal_url) => {
-            let device_id = args
-                .device_id
-                .clone()
-                .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().into_owned());
+            let device_id = host_name.clone();
             info!(%device_id, %signal_url, "webrtc transport enabled");
             let config = tetherd::webrtc::RtcConfig {
                 signal_url,
@@ -150,14 +208,93 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Management subcommands. These operate on the on-disk pairing state and exit;
-/// they never start a capture pipeline, so they work on a machine where the
-/// daemon is already running (or where screen recording isn't granted at all).
-fn run_command(command: &tetherd::config::Command) -> anyhow::Result<()> {
+/// Management subcommands. `pair` and `status` talk to the running daemon over
+/// the control channel; `devices` and `setup` operate on the on-disk state and
+/// exit. None of them start a capture pipeline, so they work on a machine
+/// where screen recording isn't granted at all.
+async fn run_command(command: &tetherd::config::Command, args: &Args) -> anyhow::Result<()> {
     use tetherd::config::{Command, DevicesAction};
+    use tetherd::control::{Request, request};
+    match command {
+        Command::Pair => {
+            let resp = request(&Request::Pair).await?;
+            match resp.code {
+                Some(code) if resp.ok => {
+                    println!("\n    Pairing code:  {code}\n");
+                    println!("Valid for 5 minutes. Enter it on the controller when it asks.");
+                    return Ok(());
+                }
+                _ => anyhow::bail!(resp.error.unwrap_or_else(|| "pairing failed".into())),
+            }
+        }
+        Command::Status => {
+            let resp = request(&Request::Status).await?;
+            let Some(st) = resp.status else {
+                anyhow::bail!(resp.error.unwrap_or_else(|| "no status".into()));
+            };
+            println!("tetherd {} — device id {}", st.version, st.device_id);
+            for t in &st.transports {
+                println!("  transport   {t}");
+            }
+            println!(
+                "  controllers {} of {} connected",
+                st.controllers, st.max_controllers
+            );
+            println!("  paired      {} device(s)", st.paired_devices);
+            println!("  audio       {}", if st.audio { "on" } else { "off" });
+            for d in &st.displays {
+                println!("  display   {d}");
+            }
+            return Ok(());
+        }
+        Command::Setup {
+            signal,
+            secret,
+            device_id,
+            codec,
+            audio,
+        } => {
+            let secret = match secret {
+                Some(s) => s.clone(),
+                None => {
+                    eprint!("Signal secret: ");
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    line.trim().to_owned()
+                }
+            };
+            if secret.is_empty() {
+                anyhow::bail!("a secret is required");
+            }
+            let mut keys: Vec<(&str, toml::Value)> =
+                vec![("signal", signal.clone().into()), ("secret", secret.into())];
+            if let Some(id) = device_id {
+                keys.push(("device_id", id.clone().into()));
+            }
+            if let Some(c) = codec {
+                let name = match c {
+                    tetherd::config::CodecArg::Jpeg => "jpeg",
+                    tetherd::config::CodecArg::H264 => "h264",
+                };
+                keys.push(("codec", name.into()));
+            }
+            if *audio {
+                keys.push(("audio", true.into()));
+            }
+            let path = match &args.config {
+                Some(p) => p.clone(),
+                None => tetherd::config::default_config_path()?,
+            };
+            tetherd::config::write_config_keys(&path, &keys)?;
+            println!("Wrote {} (readable by you only).", path.display());
+            return Ok(());
+        }
+        Command::Devices { .. } => {}
+    }
     let dir = tetherd::auth::PairingAuth::default_dir()?;
     let mut auth = tetherd::auth::PairingAuth::load_or_create(&dir)?;
     match command {
+        Command::Pair | Command::Status | Command::Setup { .. } => unreachable!("handled above"),
         Command::Devices {
             action: DevicesAction::List,
         } => {
@@ -218,28 +355,50 @@ fn start_capture(
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn start_capture(
+    codec: tetherd::config::CodecArg,
+    bitrate_kbps: u32,
+) -> anyhow::Result<tetherd::pipeline::Pipeline> {
+    use tetherd::capture::FrameEncoder;
+    use tetherd::config::CodecArg;
+    tetherd::pipeline::start(
+        || tetherd::capture::windows::DxgiCapturer::primary(30),
+        move || -> anyhow::Result<Box<dyn FrameEncoder>> {
+            Ok(match codec {
+                CodecArg::Jpeg => Box::new(tetherd::encode::JpegEncoder::new(75)?),
+                CodecArg::H264 => Box::new(tetherd::encode::h264_soft::OpenH264Encoder::new(
+                    bitrate_kbps,
+                )?),
+            })
+        },
+    )
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn start_capture(
     _codec: tetherd::config::CodecArg,
     _bitrate_kbps: u32,
 ) -> anyhow::Result<tetherd::pipeline::Pipeline> {
-    anyhow::bail!(
-        "no screen capture implementation for this platform yet (Phase 1 hosts macOS only)"
-    )
+    anyhow::bail!("no screen capture implementation for this platform (hosts: macOS, Windows)")
 }
 
 /// Drain input events onto a dedicated thread; the injector is built there
-/// because CGEventSource is thread-affine. Requires Accessibility permission
-/// (System Settings → Privacy & Security → Accessibility) — without it macOS
-/// silently discards posted events.
-#[cfg(target_os = "macos")]
+/// because platform handles (CGEventSource) are thread-affine. macOS requires
+/// Accessibility permission (System Settings → Privacy & Security →
+/// Accessibility) — without it macOS silently discards posted events.
+#[cfg(any(target_os = "macos", windows))]
 fn start_injector(
     mut input_rx: mpsc::Receiver<InjectCommand>,
     displays: tokio::sync::watch::Receiver<Vec<tether_protocol::DisplayInfo>>,
 ) {
     use tetherd::input::InputInjector;
     std::thread::spawn(move || {
-        let mut injector = match tetherd::input::macos::MacInjector::new() {
+        #[cfg(target_os = "macos")]
+        let made = tetherd::input::macos::MacInjector::new();
+        #[cfg(windows)]
+        let made = tetherd::input::windows::WinInjector::new();
+        let mut injector = match made {
             Ok(i) => i,
             Err(e) => {
                 tracing::error!(error = %e, "input injection unavailable");
@@ -267,7 +426,7 @@ fn start_injector(
     });
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn start_injector(
     mut input_rx: mpsc::Receiver<InjectCommand>,
     _displays: tokio::sync::watch::Receiver<Vec<tether_protocol::DisplayInfo>>,
@@ -282,7 +441,15 @@ fn start_clipboard() -> anyhow::Result<tetherd::clipboard::ClipboardSync> {
     )?)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn start_clipboard() -> anyhow::Result<tetherd::clipboard::ClipboardSync> {
+    // Built eagerly so a failure is reported at startup, then moved onto the
+    // sync thread (WinClipboard only holds a handle to its own owner thread).
+    let clipboard = tetherd::clipboard::windows::WinClipboard::new()?;
+    Ok(tetherd::clipboard::start(move || clipboard)?)
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn start_clipboard() -> anyhow::Result<tetherd::clipboard::ClipboardSync> {
     struct NoClipboard;
     impl tetherd::clipboard::Clipboard for NoClipboard {

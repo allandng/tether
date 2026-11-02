@@ -100,3 +100,19 @@ git history); these residuals are documented rather than fixed:
 | **Revocation is not immediate** | Takes effect at the device's next connect; an in-flight session continues. | If immediate disconnection is wanted; the session layer would have to re-check mid-stream. |
 | **Token TTL forces one re-pair on upgrade** | Pre-Phase-6 tokens have no expiry segment and are refused outright rather than grandfathered. | Never — grandfathering an unexpiring credential defeats the change. |
 | **`native-tls` over rustls for the host's `wss://`** | webrtc-rs already links rustls; adding a second rustls provider risks a process-level provider panic. native-tls also uses the system trust store, which is right for a Let's Encrypt cert on macOS and Windows. | If a Linux host ever appears, native-tls there needs OpenSSL. |
+
+## Phases 7–11 additions
+
+| Decision | Choice | Revisit when |
+|---|---|---|
+| **Windows capture API** | DXGI Desktop Duplication, cursor composited in software; not Windows.Graphics.Capture (no border on Win10, pull-based, no WinRT). | If a protected-content or per-window capture need appears (WGC handles both). |
+| **Windows H.264** | OpenH264 (software, ~12.5 ms/frame at 1080p) instead of the Media Foundation MFT; GPU→CPU readback taken. | A 4K/60 host, or CPU budget matters: add an MF/NVENC `FrameEncoder` and a GPU-resident frame path. |
+| **Login-screen / UAC access** | Not supported: logon Scheduled Task in the user session (roadmap option 1). The secure desktop freezes the stream. | If locked-machine access is genuinely missed: session-0 service + per-session host (CRD's split). |
+| **Pause / NumLock keys** | Pause unmapped; NumLock sent as plain scan 0x45 (Windows' VK mapping for these two is quirky). | When someone needs them. |
+| **macOS system audio** | Not built; `--audio` on macOS logs and continues without. | Needs a Mac to develop the ScreenCaptureKit audio output path against. |
+| **A/V sync** | Audio rides RTP, video a data channel; no correlation. Fine for UI sounds/music, visibly off for film. | Only if video moves to an RTP track. |
+| **Windows installer format** | PowerShell install/uninstall scripts + zip, not a WiX MSI. Unsigned unless a certificate is supplied. | When distributing beyond your own machines (MSI + EV/OV signing). |
+| **File-transfer resume** | A dropped transfer restarts from zero. | If large transfers over flaky links become common. |
+| **In-memory download cap** | 100 MB on touch devices, 1 GB elsewhere, unless the browser can stream to disk (File System Access API). | A service-worker streaming download for Safari. |
+| **PWA offline shell** | No service worker; the app needs the network anyway. | If Android install prompts or offline launch ever require one. |
+| **WebRTC transfer audit label** | Logged as the controller's signal device id (identity-pinned by the signal server), not the paired-device name. | If audit needs the pairing identity: thread it from the ctl auth gate to the bulk channel. |

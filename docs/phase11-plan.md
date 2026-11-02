@@ -154,5 +154,4 @@ disconnection is **out of scope** — a failed transfer restarts.
 
 ---
 
-**Status: planned, not started. Independent of Phases 7–10; depends on Phase 6
-only in the sense that everything does.**
+**Status: done — see [phase11-gate-results.md](phase11-gate-results.md).**

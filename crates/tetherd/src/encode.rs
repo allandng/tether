@@ -6,6 +6,10 @@ use crate::capture::{FrameEncoder, RawFrame};
 
 #[cfg(target_os = "macos")]
 pub mod h264;
+#[cfg(windows)]
+pub mod h264_soft;
+#[cfg(any(windows, test))]
+pub mod yuv;
 
 /// JPEG via libjpeg-turbo (SIMD). ~15–25 ms per Retina-sized frame, which
 /// holds the ≥15 fps gate; H.264/VideoToolbox is a Module 6 drop-in here.

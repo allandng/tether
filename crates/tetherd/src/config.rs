@@ -1,10 +1,19 @@
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use anyhow::Context;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser};
+use serde::Deserialize;
 
 /// Tether host daemon: stream this machine's screen to an allowed controller
 /// and inject the input events it sends back. Two transports, either or both:
 /// a LAN WebSocket (--bind/--allow) and signaled WebRTC (--signal/--secret).
+///
+/// Every flag can also be set in `config.toml` in the state directory
+/// (`~/.config/tether` on macOS, `%APPDATA%\tether` on Windows), which is how
+/// a service runs it without the secret appearing in its command line. A flag
+/// given on the command line overrides the file; the file overrides defaults.
 #[derive(Parser, Debug, Clone)]
 #[command(name = "tetherd", version)]
 pub struct Args {
@@ -12,6 +21,10 @@ pub struct Args {
     /// existing invocation keeps working unchanged.
     #[command(subcommand)]
     pub command: Option<Command>,
+
+    /// Read settings from this file instead of `<state dir>/config.toml`.
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
 
     /// LAN transport: interface address to bind. Must be loopback or a
     /// private/link-local LAN address; 0.0.0.0 and public addresses are
@@ -72,10 +85,175 @@ pub struct Args {
     /// paired. Dev/LAN only — defeats pairing; logged loudly.
     #[arg(long)]
     pub allow_unpaired: bool,
+
+    /// Folder that files uploaded from a controller land in (default: this
+    /// user's Downloads folder). The controller never chooses the location.
+    #[arg(long)]
+    pub upload_dir: Option<std::path::PathBuf>,
+
+    /// Largest file a controller may upload, in MiB.
+    #[arg(long, default_value_t = 4096)]
+    pub max_upload_mb: u64,
+
+    /// Stream this machine's system audio to controllers (WebRTC only). Off
+    /// by default: it would otherwise broadcast whatever is playing in the
+    /// room to whoever connects.
+    #[arg(long)]
+    pub audio: bool,
+}
+
+/// `config.toml`: the same settings as the flags, by the same names.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileConfig {
+    pub bind: Option<IpAddr>,
+    pub port: Option<u16>,
+    pub allow: Option<Vec<IpAddr>>,
+    pub signal: Option<String>,
+    pub secret: Option<String>,
+    pub device_id: Option<String>,
+    pub stun: Option<Vec<String>>,
+    pub codec: Option<CodecArg>,
+    pub bitrate_kbps: Option<u32>,
+    pub max_controllers: Option<u32>,
+    pub require_pairing: Option<bool>,
+    pub allow_unpaired: Option<bool>,
+    pub upload_dir: Option<PathBuf>,
+    pub max_upload_mb: Option<u64>,
+    pub audio: Option<bool>,
+}
+
+/// The default config file location.
+pub fn default_config_path() -> anyhow::Result<PathBuf> {
+    Ok(state_dir()?.join("config.toml"))
+}
+
+impl Args {
+    /// Parse the command line, then fill every setting *not* given there from
+    /// the config file (if it exists).
+    pub fn load() -> anyhow::Result<Args> {
+        let matches = Args::command().get_matches();
+        let mut args = Args::from_arg_matches(&matches)?;
+        let path = match &args.config {
+            Some(p) => p.clone(),
+            None => default_config_path()?,
+        };
+        if path.exists() {
+            let file = read_config(&path)?;
+            args.apply_file(file, |id| {
+                matches.value_source(id) == Some(ValueSource::CommandLine)
+            });
+        } else if args.config.is_some() && !matches!(args.command, Some(Command::Setup { .. })) {
+            // `setup --config <new file>` creates it; anything else needs it.
+            anyhow::bail!("config file {} not found", path.display());
+        }
+        Ok(args)
+    }
+
+    /// Merge `file` under the command line: a setting is taken from the file
+    /// only when `from_cli(<flag id>)` says the user didn't pass it.
+    pub fn apply_file(&mut self, f: FileConfig, from_cli: impl Fn(&str) -> bool) {
+        macro_rules! fill {
+            ($field:ident) => {
+                if !from_cli(stringify!($field))
+                    && let Some(v) = f.$field
+                {
+                    self.$field = v;
+                }
+            };
+            (opt $field:ident) => {
+                if !from_cli(stringify!($field)) && f.$field.is_some() {
+                    self.$field = f.$field;
+                }
+            };
+        }
+        fill!(opt bind);
+        fill!(port);
+        fill!(allow);
+        fill!(opt signal);
+        fill!(opt secret);
+        fill!(opt device_id);
+        fill!(stun);
+        fill!(codec);
+        fill!(bitrate_kbps);
+        fill!(max_controllers);
+        fill!(require_pairing);
+        fill!(allow_unpaired);
+        fill!(opt upload_dir);
+        fill!(max_upload_mb);
+        fill!(audio);
+    }
+}
+
+/// Read and parse a config file. On Unix it holds the signal secret, so —
+/// like `host.key` — a group/world-readable file is refused.
+pub fn read_config(path: &Path) -> anyhow::Result<FileConfig> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            anyhow::bail!(
+                "{} is group/world-accessible (mode {mode:o}) and holds the signal secret; \
+                 run: chmod 600 {}",
+                path.display(),
+                path.display()
+            );
+        }
+    }
+    toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+}
+
+/// `tetherd setup`: write (or update) keys in the config file, owner-only.
+/// Keys not mentioned are kept as they were.
+pub fn write_config_keys(path: &Path, keys: &[(&str, toml::Value)]) -> anyhow::Result<()> {
+    let mut table: toml::Table = if path.exists() {
+        std::fs::read_to_string(path)?
+            .parse()
+            .with_context(|| format!("parsing config {}", path.display()))?
+    } else {
+        toml::Table::new()
+    };
+    for (k, v) in keys {
+        table.insert((*k).to_owned(), v.clone());
+    }
+    // validate before writing: never leave a config the daemon can't load
+    let text = toml::to_string(&table)?;
+    let _: FileConfig = toml::from_str(&text).context("resulting config is invalid")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::auth::atomic_write(path, text.as_bytes(), 0o600)
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Arm a one-time pairing code on the running daemon and print it.
+    Pair,
+    /// Show the running daemon's state: transports, controllers, displays.
+    Status,
+    /// Write the signal server and secret (and optionally other settings) to
+    /// the config file, owner-readable only — so a service can start without
+    /// any secret on its command line. Omit --secret to be prompted for it.
+    Setup {
+        /// Signal server: host:port, or a full ws:// / wss:// URL.
+        #[arg(long)]
+        signal: String,
+        /// Pre-shared signal secret (prompted for on stdin when omitted).
+        #[arg(long)]
+        secret: Option<String>,
+        /// Device id to register as (default: hostname).
+        #[arg(long)]
+        device_id: Option<String>,
+        /// Frame codec to configure.
+        #[arg(long, value_enum)]
+        codec: Option<CodecArg>,
+        /// Also stream system audio.
+        #[arg(long)]
+        audio: bool,
+    },
     /// Inspect and revoke paired devices.
     ///
     /// Operates directly on `~/.config/tether/paired.json`. A running daemon
@@ -98,7 +276,8 @@ pub enum DevicesAction {
     },
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CodecArg {
     Jpeg,
     H264,
@@ -136,6 +315,21 @@ impl Args {
     }
 }
 
+/// Where per-user state lives (`host.key`, `paired.json`, `config.toml`):
+/// `~/.config/tether` on macOS/Unix, `%APPDATA%\tether` on Windows.
+pub fn state_dir() -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context;
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .context("APPDATA not set")?;
+    #[cfg(not(windows))]
+    let base = std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".config"))
+        .context("HOME not set")?;
+    Ok(base.join("tether"))
+}
+
 /// `tetherd` is a remote-control backdoor by design; refuse to listen on
 /// anything that could be a public interface. Loopback is allowed for
 /// same-machine development and tests.
@@ -165,6 +359,54 @@ pub fn ip_allowed(allow: &[IpAddr], peer: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_file_fills_only_what_the_command_line_left_unset() {
+        let mut args = Args::parse_from(["tetherd", "--port", "9000", "--codec", "jpeg"]);
+        let file: FileConfig = toml::from_str(
+            r#"
+            signal = "wss://tether.example.com/ws"
+            secret = "s3cret"
+            port = 7000
+            codec = "h264"
+            bitrate_kbps = 2500
+            allow = ["192.168.1.20"]
+            audio = true
+            "#,
+        )
+        .unwrap();
+        let cli = ["port", "codec"];
+        args.apply_file(file, |id| cli.contains(&id));
+        assert_eq!(args.port, 9000, "CLI beats file");
+        assert_eq!(args.codec, CodecArg::Jpeg, "CLI beats file");
+        assert_eq!(args.signal.as_deref(), Some("wss://tether.example.com/ws"));
+        assert_eq!(args.secret.as_deref(), Some("s3cret"));
+        assert_eq!(args.bitrate_kbps, 2500, "file beats default");
+        assert_eq!(args.allow, vec![ip("192.168.1.20")]);
+        assert!(args.audio);
+        assert_eq!(args.max_controllers, 1, "default when neither sets it");
+    }
+
+    #[test]
+    fn config_file_rejects_typos() {
+        assert!(toml::from_str::<FileConfig>("secrte = \"x\"").is_err());
+        assert!(toml::from_str::<FileConfig>("codec = \"vp9\"").is_err());
+    }
+
+    #[test]
+    fn setup_writes_a_loadable_owner_only_config() {
+        let dir = std::env::temp_dir().join(format!("tether-cfg-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        write_config_keys(&path, &[("signal", "a:1".into()), ("secret", "x".into())]).unwrap();
+        // a second setup keeps keys it doesn't mention
+        write_config_keys(&path, &[("codec", "h264".into())]).unwrap();
+        let cfg = read_config(&path).unwrap();
+        assert_eq!(cfg.signal.as_deref(), Some("a:1"));
+        assert_eq!(cfg.secret.as_deref(), Some("x"));
+        assert_eq!(cfg.codec, Some(CodecArg::H264));
+        assert!(write_config_keys(&path, &[("codec", "vp9".into())]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()

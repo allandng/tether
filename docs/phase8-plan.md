@@ -133,5 +133,4 @@ minimal worker only if Android installability turns out to need it.
 
 ---
 
-**Status: planned, not started. Depends on Phase 6 (identity), and reads better
-with Phase 7 (`os` badges) but does not require it.**
+**Status: done — see [phase8-gate-results.md](phase8-gate-results.md).**

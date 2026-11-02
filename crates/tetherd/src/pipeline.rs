@@ -132,6 +132,11 @@ where
                     info!(?current, "capture resolution changed");
                     resolution = current;
                     let _ = resolution_tx.send(resolution);
+                    // A mode change or an unplugged monitor can also change
+                    // the display set or which one is active (the capturer
+                    // may have fallen back to the primary): republish so the
+                    // picker — and the injector's mapping — follow.
+                    let _ = displays_tx.send(capturer.displays());
                 }
                 // apply any adaptive-bitrate request (0 = leave at default)
                 let requested = bitrate_loop.load(Ordering::Relaxed);
@@ -139,6 +144,9 @@ where
                     encoder.set_bitrate(requested);
                 }
                 match encoder.encode(&raw) {
+                    // Rate control skipped this frame (software encoders do
+                    // under bitrate pressure): nothing to send.
+                    Ok(payload) if payload.is_empty() => {}
                     Ok(payload) => {
                         seq = seq.wrapping_add(1);
                         let frame = EncodedFrame {
@@ -174,7 +182,13 @@ fn is_transient(e: &anyhow::Error) -> bool {
         .is_some()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn is_transient(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::capture::windows::NoDisplays>()
+        .is_some()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn is_transient(_: &anyhow::Error) -> bool {
     false
 }

@@ -1,0 +1,6 @@
+# Shell scripts and the pkg postinstall run on macOS/Linux: never CRLF.
+*.sh text eol=lf
+packaging/macos/postinstall text eol=lf
+packaging/macos/*.plist text eol=lf
+# PowerShell is happy either way; keep CRLF-friendly default.
+*.ps1 text

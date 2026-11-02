@@ -20,6 +20,8 @@ function makeSession(token: string | null = null) {
     onFrame: vi.fn(),
     onClipboard: vi.fn(),
     onDisplays: vi.fn(),
+    onHostInfo: vi.fn(),
+    onFileMessage: vi.fn(),
     onPairingRequired: vi.fn(),
     onPairingFailed: vi.fn(),
     onProtocolError: vi.fn(),

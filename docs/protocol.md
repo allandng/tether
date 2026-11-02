@@ -1,8 +1,8 @@
 # Tether wire protocol — version 1
 
 Transport-agnostic binary protocol between a **host** (`tetherd`, the machine
-being controlled) and a **controller** (the viewer). Phase 1 carries it over
-WebSocket; Phase 2 will carry the identical bytes over a WebRTC data channel.
+being controlled) and a **controller** (the viewer). The identical bytes ride
+a LAN WebSocket or WebRTC data channels (see the transport mapping below).
 
 All multi-byte integers are **little-endian**.
 
@@ -40,10 +40,13 @@ message types is *not* a safe fallback.
 ```
 controller → host : Hello { version, role=controller, caps }
 host       → controller : Hello { version, role=host, caps }     (or close: bad version/role)
+   ...                    Auth / PairRequest ⇄ AuthResult / PairResult
 host       → controller : Resolution { width, height }
+host       → controller : ClipboardData, Displays, HostInfo      (current state)
 host       → controller : FrameData ...                          (continuous)
 controller → host : InputEvent ...                               (as input happens)
 host       → controller : Resolution                             (again, if capture size changes)
+either     → either     : File* ...                              (transfers, any time after auth)
 ```
 
 The host validates that the peer's `Hello` has `role = controller` and the
@@ -56,12 +59,20 @@ The host validates that the peer's `Hello` has `role = controller` and the
 ```
 0  u16  version
 2  u8   role          0 = host, 1 = controller
-3  u8   capabilities  bit 0 (0x01) = can_host, bit 1 (0x02) = can_control
+3  u8   capabilities  bit 0 (0x01) = can_host, bit 1 (0x02) = can_control,
+                      bit 2 (0x04) = audio,    bit 3 (0x08) = files
 ```
 
 Capabilities describe the *peer device*, not the current session. A
 control-only device (phone/tablet) never sets `can_host` — and its build
 contains no host code path at all.
+
+- **audio** (`CAP_AUDIO`, Phase 10): controller — can play a WebRTC audio
+  track (set on WebRTC only); host — will attach one, so it sets the bit only
+  when run with `--audio`, and never in its LAN Hello. See *System audio*
+  below.
+- **files** (`CAP_FILES`, Phase 11): this peer speaks the file-transfer
+  messages `0x0E`–`0x12`. Current hosts and controllers always set it.
 
 ### 0x02 — Resolution (host → controller)
 
@@ -181,6 +192,105 @@ The host switches its single capture to that display and re-announces
 `Resolution` + `Displays` to all connected controllers. Shared: all controllers
 view the same display.
 
+### Length-prefixed fields
+
+The messages below (like pairing/auth) carry **fields**: `u16 len` then
+`len` bytes, UTF-8 for strings. A field is at most 512 bytes; a message may
+cap it lower.
+
+### 0x0D — HostInfo (host → controller, Phase 7)
+
+```
+0  u8     os        0 = unknown, 1 = macOS, 2 = Windows, 3 = Linux
+1  field  version   tetherd's version string (e.g. "0.1.0")
+…  field  name      the host's display name
+```
+
+Sent once after auth, right after the initial `Displays`, on the control
+path. The controller uses `os` for its modifier policy (Cmd → Ctrl against a
+Windows host, `controller/src/remap.ts`) and shows `name`.
+
+### 0x0E — FileOffer (either direction, Phase 11)
+
+```
+0   u32    transfer_id
+4   u64    size        bytes the sender will send
+12  field  name        bare file name, ≤ 255 bytes — never a path
+```
+
+The receiver chooses where the file lands (the host: the user's Downloads
+folder or `--upload-dir`, after reducing `name` to a safe basename or
+refusing it).
+
+### 0x0F — FileAccept (either direction, Phase 11)
+
+```
+0  u32    transfer_id
+4  u8     ok          1 = accepted, 0 = refused
+5  field  reason      human-readable refusal reason; empty when ok
+```
+
+### 0x10 — FileChunk (either direction, Phase 11)
+
+```
+0  u32  transfer_id
+4  u32  seq         0, 1, 2, … in order; a gap is an error
+8  …    bytes       rest of payload, ≤ 61440 (60 KiB)
+```
+
+Receivers reject chunks over 60 KiB (webrtc-rs drops data-channel messages
+over 64 KiB). Senders use `16 KiB − 64` = 16320 bytes, so one encoded chunk
+fits a single 16 KiB `tether-bulk` message and never holds up the control
+traffic sharing its transport for long.
+
+### 0x11 — FileEnd (either direction, Phase 11)
+
+```
+0  u32  transfer_id
+4  u8   status       0 = complete, 1 = cancelled, 2 = error
+```
+
+The single teardown path for success, cancellation and failure. From the
+sender, `complete` means every chunk has been sent; from the receiver, that
+the file was saved. Either side may send `cancelled` or `error` at any
+point. Other status values are corrupt.
+
+### 0x12 — FileRequest (controller → host, Phase 11)
+
+```
+0  u32  transfer_id
+4  …    path         UTF-8 host path, rest of payload, ≤ 4096 bytes
+```
+
+Asks the host to send a file. The host answers with a `FileOffer` carrying
+the same id, or a `FileEnd` error (e.g. no such file).
+
+### File transfer flow
+
+The **controller allocates every `transfer_id`** — its uploads and the ids in
+its `FileRequest`s — so ids are unique per session in both directions.
+
+```
+upload (controller → host):
+  controller → FileOffer  { id, size, name }
+  host       → FileAccept { id, ok, reason }       (refused → done)
+  controller → FileChunk  { id, seq = 0, 1, … } …
+  controller → FileEnd    { id, complete }         (all chunks sent)
+  host       → FileEnd    { id, complete }         (saved; or error)
+
+download (host → controller):
+  controller → FileRequest { id, path }
+  host       → FileOffer   { id, size, name }      (or FileEnd error)
+  controller → FileAccept  { id, ok, reason }      (refused → done)
+  host       → FileChunk   { id, seq = 0, 1, … } …
+  host       → FileEnd     { id, complete }
+```
+
+The host writes an upload to a hidden temp file and gives it its real name
+only once complete (never overwriting: collisions get ` (1)`, ` (2)`, …); a
+cancelled, failed or disconnected transfer deletes it. File messages from an
+unauthenticated peer are ignored.
+
 ## WebRTC transport mapping (Phase 2)
 
 Three data channels, all carrying the wire format above unchanged:
@@ -189,9 +299,13 @@ Three data channels, all carrying the wire format above unchanged:
   small messages only (single data-channel messages cap at ~16 KiB for safe
   interop; some stacks silently drop larger ones).
 - **`tether-media`** (reliable, ordered): `FrameData` only, chunked.
-- **`tether-bulk`** (reliable, ordered): anything oversized — `ClipboardData`
-  today, file transfer later — chunked with the same framing. `TextInput` is
-  small and rides `tether-ctl`.
+- **`tether-bulk`** (reliable, ordered): anything oversized or bulky —
+  `ClipboardData` and every file-transfer message (`0x0E`–`0x12`) — chunked
+  with the same framing. One writer owns each side's send path, so a
+  message's chunks always go out back to back (reassembly is latest-wins per
+  sequence number); the host pauses file data while more than 1 MiB is
+  queued in the SCTP send buffer. `TextInput` and `HostInfo` are small and
+  ride `tether-ctl`.
 
 Chunk framing (media and bulk): `[u32 LE seq][u16 LE chunk_idx]
 [u16 LE chunk_count]` followed by a slice of the complete wire message;
@@ -199,9 +313,53 @@ payload ≤ 16 KiB − 8. Reassembly is latest-wins per channel. The chunk heade
 is transport framing, not part of the tether protocol (reference impls:
 `controller/src/chunks.ts`, `crates/tetherd/src/webrtc.rs`).
 
+On the **LAN WebSocket** there is only the one socket: file messages share it
+with everything else, one protocol message per binary frame.
+
 H.264 `FrameData` payloads are Annex B access units (4-byte start codes,
 SPS/PPS in-band on keyframes); each payload is one complete, independently
 parseable access unit, and keyframes recur every ~2 s.
+
+### System audio (Phase 10)
+
+System audio is a real WebRTC **Opus** media track (48 kHz stereo, 20 ms
+frames), not a protocol message. The controller's offer always includes a
+`recvonly` audio transceiver; the host attaches its track only when run with
+`--audio` *and* the offer has an `m=audio` section (an older controller's
+does not), and starts sending only after the controller authenticates. LAN
+sessions never carry audio.
+
+## Test vectors (Phase 7/11 messages)
+
+Complete encoded messages, pinned in `host_info_and_file_transfer_vectors`
+(`crates/tether-protocol`) and `controller/src/protocol.test.ts`:
+
+| Message | Bytes (hex) |
+|---|---|
+| `HostInfo { os: 2, version: "1", name: "pc" }` | `09 00 00 00 0D 02 01 00 31 02 00 70 63` |
+| `FileOffer { transfer_id: 1, size: 0x0102, name: "a" }` | `10 00 00 00 0E 01 00 00 00 02 01 00 00 00 00 00 00 01 00 61` |
+| `FileAccept { transfer_id: 1, ok: true, reason: "" }` | `08 00 00 00 0F 01 00 00 00 01 00 00` |
+| `FileChunk { transfer_id: 1, seq: 2, bytes: [AB] }` | `0A 00 00 00 10 01 00 00 00 02 00 00 00 AB` |
+| `FileEnd { transfer_id: 1, status: 2 (error) }` | `06 00 00 00 11 01 00 00 00 02` |
+| `FileRequest { transfer_id: 1, path: "/a" }` | `07 00 00 00 12 01 00 00 00 2F 61` |
+
+## Signaling (JSON — not this protocol)
+
+WebRTC setup goes through `tether-signal`: JSON text over WebSocket, serde
+`tag = "type"`, snake_case (`crates/tether-signal/src/protocol.rs`, mirrored
+in `controller/src/signaling.ts`, shapes pinned on both sides). Phase 8 added
+an optional **`os`** string — `"macos"`, `"windows"` or `"linux"` — to
+`register` and to each `PeerInfo` in `peers`. Hosts send it; the server
+echoes it (truncated to 16 chars) so a controller can badge machines before
+connecting. It is omitted when empty, and older peers neither send nor
+expect it:
+
+```json
+{"type":"register","device_id":"pc","name":"PC","caps":{"can_host":true,"can_control":true},
+ "auth":"…","pubkey":"…","sig":"…","os":"windows"}
+{"type":"peers","peers":[{"device_id":"pc","name":"PC",
+ "caps":{"can_host":true,"can_control":true},"os":"windows"}]}
+```
 
 ## Reference implementations
 

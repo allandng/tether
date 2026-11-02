@@ -11,6 +11,30 @@ export const MAX_DISPLAYS = 64;
 
 export const CAP_CAN_HOST = 0b01;
 export const CAP_CAN_CONTROL = 0b10;
+/** Peer can send (host) / play (controller) a WebRTC system-audio track. */
+export const CAP_AUDIO = 0b100;
+/** Peer speaks the file-transfer messages (0x0E–0x12). */
+export const CAP_FILES = 0b1000;
+
+export const MAX_FILE_NAME_LEN = 255;
+export const MAX_FILE_PATH_LEN = 4096;
+export const MAX_FILE_CHUNK_LEN = 60 * 1024;
+/** Chunk size senders use: one encoded FileChunk fits a 16 KiB bulk message. */
+export const FILE_CHUNK_LEN = 16 * 1024 - 64;
+
+/** HostInfo.os values. */
+export const enum HostOs {
+  Unknown = 0,
+  MacOs = 1,
+  Windows = 2,
+  Linux = 3,
+}
+
+export const enum FileStatus {
+  Complete = 0,
+  Cancelled = 1,
+  Error = 2,
+}
 
 export const enum Role {
   Host = 0,
@@ -40,6 +64,12 @@ const enum MsgType {
   AuthResult = 0x0a,
   Displays = 0x0b,
   SelectDisplay = 0x0c,
+  HostInfo = 0x0d,
+  FileOffer = 0x0e,
+  FileAccept = 0x0f,
+  FileChunk = 0x10,
+  FileEnd = 0x11,
+  FileRequest = 0x12,
 }
 
 export const MAX_AUTH_FIELD_LEN = 512;
@@ -139,7 +169,54 @@ export interface SelectDisplay {
   id: number;
 }
 
+/** Host → controller after the handshake: what the host is. */
+export interface HostInfo {
+  type: "host_info";
+  os: number;
+  version: string;
+  name: string;
+}
+
+/** Either direction: offer a file (a bare name, never a path). */
+export interface FileOffer {
+  type: "file_offer";
+  transferId: number;
+  size: number;
+  name: string;
+}
+
+export interface FileAccept {
+  type: "file_accept";
+  transferId: number;
+  ok: boolean;
+  reason: string;
+}
+
+export interface FileChunk {
+  type: "file_chunk";
+  transferId: number;
+  seq: number;
+  data: Uint8Array;
+}
+
+export interface FileEnd {
+  type: "file_end";
+  transferId: number;
+  status: FileStatus;
+}
+
+/** Controller → host: send me the file at this host path. */
+export interface FileRequest {
+  type: "file_request";
+  transferId: number;
+  path: string;
+}
+
+export type FileMessage = FileOffer | FileAccept | FileChunk | FileEnd | FileRequest;
+
 export type Message =
+  | HostInfo
+  | FileMessage
   | Hello
   | Resolution
   | FrameData
@@ -327,6 +404,61 @@ export function encodeSelectDisplay(s: Omit<SelectDisplay, "type">): Uint8Array 
   }, 5);
 }
 
+export function encodeFileOffer(f: Omit<FileOffer, "type">): Uint8Array {
+  const name = textEncoder.encode(f.name);
+  return finish((view, bytes) => {
+    view.setUint8(4, MsgType.FileOffer);
+    view.setUint32(5, f.transferId, true);
+    setUint64(view, 9, f.size);
+    return writeField(view, bytes, 17, name) - 4;
+  }, 1 + 12 + fieldLen(name));
+}
+
+export function encodeFileAccept(f: Omit<FileAccept, "type">): Uint8Array {
+  const reason = textEncoder.encode(f.reason);
+  return finish((view, bytes) => {
+    view.setUint8(4, MsgType.FileAccept);
+    view.setUint32(5, f.transferId, true);
+    view.setUint8(9, f.ok ? 1 : 0);
+    return writeField(view, bytes, 10, reason) - 4;
+  }, 1 + 5 + fieldLen(reason));
+}
+
+export function encodeFileChunk(f: Omit<FileChunk, "type">): Uint8Array {
+  return finish(
+    (view, bytes) => {
+      view.setUint8(4, MsgType.FileChunk);
+      view.setUint32(5, f.transferId, true);
+      view.setUint32(9, f.seq, true);
+      bytes.set(f.data, 13);
+      return 9 + f.data.length;
+    },
+    9 + f.data.length,
+  );
+}
+
+export function encodeFileEnd(f: Omit<FileEnd, "type">): Uint8Array {
+  return finish((view) => {
+    view.setUint8(4, MsgType.FileEnd);
+    view.setUint32(5, f.transferId, true);
+    view.setUint8(9, f.status);
+    return 6;
+  }, 6);
+}
+
+export function encodeFileRequest(f: Omit<FileRequest, "type">): Uint8Array {
+  const path = textEncoder.encode(f.path);
+  return finish(
+    (view, bytes) => {
+      view.setUint8(4, MsgType.FileRequest);
+      view.setUint32(5, f.transferId, true);
+      bytes.set(path, 9);
+      return 5 + path.length;
+    },
+    5 + path.length,
+  );
+}
+
 export function encodeMessage(m: Message): Uint8Array {
   switch (m.type) {
     case "hello":
@@ -347,6 +479,17 @@ export function encodeMessage(m: Message): Uint8Array {
       return encodeAuth(m);
     case "select_display":
       return encodeSelectDisplay(m);
+    case "file_offer":
+      return encodeFileOffer(m);
+    case "file_accept":
+      return encodeFileAccept(m);
+    case "file_chunk":
+      return encodeFileChunk(m);
+    case "file_end":
+      return encodeFileEnd(m);
+    case "file_request":
+      return encodeFileRequest(m);
+    case "host_info":
     case "pair_result":
     case "auth_result":
     case "displays":
@@ -473,6 +616,83 @@ export function decodeMessage(data: ArrayBuffer | Uint8Array): DecodeResult {
     case MsgType.SelectDisplay: {
       if (payloadLen !== 4) return corrupt("bad SelectDisplay length");
       return ok({ type: "select_display", id: view.getUint32(5, true) });
+    }
+    case MsgType.HostInfo: {
+      if (payloadLen < 1) return corrupt("empty HostInfo");
+      const os = view.getUint8(5);
+      const v = readField(bytes, view, 6);
+      const n = v && readField(bytes, view, v.next);
+      if (!v || !n || n.next !== bytes.length) return corrupt("bad HostInfo fields");
+      try {
+        return ok({
+          type: "host_info",
+          os,
+          version: textDecoder.decode(v.field),
+          name: textDecoder.decode(n.field),
+        });
+      } catch {
+        return corrupt("HostInfo not UTF-8");
+      }
+    }
+    case MsgType.FileOffer: {
+      if (payloadLen < 12) return corrupt("bad FileOffer length");
+      const r = readField(bytes, view, 17);
+      if (!r || r.next !== bytes.length) return corrupt("bad FileOffer name");
+      if (r.field.length > MAX_FILE_NAME_LEN) return corrupt("file name too long");
+      try {
+        return ok({
+          type: "file_offer",
+          transferId: view.getUint32(5, true),
+          size: getUint64(view, 9),
+          name: textDecoder.decode(r.field),
+        });
+      } catch {
+        return corrupt("file name not UTF-8");
+      }
+    }
+    case MsgType.FileAccept: {
+      if (payloadLen < 5) return corrupt("bad FileAccept length");
+      const r = readField(bytes, view, 10);
+      if (!r || r.next !== bytes.length) return corrupt("bad FileAccept reason");
+      try {
+        return ok({
+          type: "file_accept",
+          transferId: view.getUint32(5, true),
+          ok: view.getUint8(9) !== 0,
+          reason: textDecoder.decode(r.field),
+        });
+      } catch {
+        return corrupt("FileAccept reason not UTF-8");
+      }
+    }
+    case MsgType.FileChunk: {
+      if (payloadLen < 8) return corrupt("bad FileChunk length");
+      if (payloadLen - 8 > MAX_FILE_CHUNK_LEN) return corrupt("file chunk too large");
+      return ok({
+        type: "file_chunk",
+        transferId: view.getUint32(5, true),
+        seq: view.getUint32(9, true),
+        data: bytes.subarray(13),
+      });
+    }
+    case MsgType.FileEnd: {
+      if (payloadLen !== 5) return corrupt("bad FileEnd length");
+      const status = view.getUint8(9);
+      if (status > 2) return corrupt("bad file status");
+      return ok({ type: "file_end", transferId: view.getUint32(5, true), status });
+    }
+    case MsgType.FileRequest: {
+      if (payloadLen < 4) return corrupt("bad FileRequest length");
+      if (payloadLen - 4 > MAX_FILE_PATH_LEN) return corrupt("file path too long");
+      try {
+        return ok({
+          type: "file_request",
+          transferId: view.getUint32(5, true),
+          path: textDecoder.decode(bytes.subarray(9)),
+        });
+      } catch {
+        return corrupt("file path not UTF-8");
+      }
     }
     default:
       return { ok: false, reason: "unknown-type", msgType };

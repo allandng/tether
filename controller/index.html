@@ -8,22 +8,295 @@
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Tether" />
     <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#111113" />
+    <meta name="description" content="Control your computers from anywhere." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <title>Tether</title>
     <style>
+      :root {
+        --bg: #111113;
+        --panel: #1c1c1f;
+        --raised: #2a2a2e;
+        --line: #3a3a3f;
+        --text: #ececf0;
+        --muted: #9a9aa3;
+        --accent: #3578f6;
+        --ok: #2ecc71;
+        --warn: #e6a700;
+        --bad: #e5534b;
+        color-scheme: dark;
+      }
       html,
       body {
         margin: 0;
         height: 100%;
-        background: #111;
-        color: #eee;
-        font-family: system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
         overflow: hidden;
       }
       #app {
+        height: 100%;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+        color: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      input[type="text"],
+      input[type="password"],
+      select {
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 10px;
+        min-width: 0;
+      }
+      .primary {
+        background: var(--accent);
+        border: none;
+        color: #fff;
+        border-radius: 8px;
+        padding: 8px 14px;
+      }
+      .icon {
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 10px;
+        line-height: 1;
+      }
+      .icon:hover {
+        background: #36363b;
+      }
+      .icon.small {
+        padding: 2px 7px;
+        font-size: 12px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .small {
+        font-size: 13px;
+      }
+      code {
+        background: var(--raised);
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+
+      /* ---- machine list ------------------------------------------------- */
+      #list-view {
+        height: 100%;
+        overflow-y: auto;
+        box-sizing: border-box;
+        max-width: 640px;
+        margin: 0 auto;
+        padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+      }
+      .top {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .top h1 {
+        font-size: 24px;
+        margin: 4px 0 16px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+      }
+      .top h2 {
+        font-size: 17px;
+        margin: 0;
+      }
+      .top .icon {
+        margin-left: auto;
+      }
+      #dir-state {
+        font-size: 13px;
+        margin-bottom: 12px;
+      }
+      #dir-state.state-online::before {
+        content: "● ";
+        color: var(--ok);
+      }
+      #dir-state.state-error {
+        color: var(--bad);
+      }
+      #machines {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 8px;
+      }
+      .machine {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        text-align: left;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .machine:hover:not(:disabled) {
+        background: #242428;
+      }
+      .machine:disabled {
+        cursor: default;
+        opacity: 0.6;
+      }
+      .machine .name {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        font-weight: 550;
+        overflow: hidden;
+      }
+      .machine small {
+        font-weight: 400;
+        color: var(--muted);
+        margin-top: 2px;
+      }
+      .os {
+        flex: none;
+        font-size: 11px;
+        font-weight: 600;
+        width: 64px;
+        text-align: center;
+        padding: 4px 0;
+        border-radius: 6px;
+        background: var(--raised);
+        color: var(--muted);
+      }
+      .os-windows {
+        color: #6cb6ff;
+      }
+      .os-macos {
+        color: #e0e0e6;
+      }
+      .os-linux {
+        color: #f0b400;
+      }
+      .status {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex: none;
+        background: #555;
+      }
+      .status.online {
+        background: var(--ok);
+      }
+      .status.new {
+        background: var(--warn);
+      }
+      .empty {
+        background: var(--panel);
+        border: 1px dashed var(--line);
+        border-radius: 12px;
+        padding: 18px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .empty p {
+        margin: 0 0 10px;
+      }
+      #lan-box {
+        margin-top: 24px;
+        color: var(--muted);
+      }
+      #lan-box summary {
+        cursor: pointer;
+        padding: 6px 0;
+      }
+      #lan-form,
+      #download-form {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      #lan-form input,
+      #download-form input {
+        flex: 1;
+      }
+
+      /* ---- settings ------------------------------------------------------ */
+      dialog {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        width: min(440px, calc(100vw - 32px));
+        padding: 20px;
+      }
+      dialog::backdrop {
+        background: rgb(0 0 0 / 60%);
+      }
+      dialog h2 {
+        margin: 0 0 14px;
+        font-size: 18px;
+      }
+      dialog h3 {
+        font-size: 14px;
+        margin: 18px 0 6px;
+        color: var(--muted);
+      }
+      dialog label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 13px;
+        color: var(--muted);
+        margin-bottom: 10px;
+      }
+      #saved {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      #saved li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      #saved button,
+      dialog .row button:not(.primary) {
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 12px;
+      }
+      dialog .row {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 18px;
+      }
+
+      /* ---- session ------------------------------------------------------- */
+      #session-view {
         display: flex;
         flex-direction: column;
         height: 100%;
+        position: relative;
+        background: #000;
       }
       #bar {
         display: flex;
@@ -33,9 +306,16 @@
         padding-top: max(8px, env(safe-area-inset-top));
         padding-left: max(12px, env(safe-area-inset-left));
         padding-right: max(12px, env(safe-area-inset-right));
-        background: #1c1c1e;
+        background: var(--panel);
         flex: none;
         flex-wrap: wrap;
+      }
+      #title {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 40vw;
       }
       #dot {
         width: 10px;
@@ -43,93 +323,38 @@
         border-radius: 50%;
         flex: none;
       }
-      #dot.closed { background: #555; }
-      #dot.connecting { background: #e6a700; }
-      #dot.connected { background: #2ecc71; }
-      #mode,
-      #display,
-      #signal,
-      #secret,
-      #target,
-      #host {
-        background: #2a2a2d;
-        border: 1px solid #3a3a3d;
-        color: #eee;
-        border-radius: 6px;
-        padding: 6px 10px;
-        width: 280px;
-        font: inherit;
+      #dot.closed {
+        background: #555;
       }
-      #connect {
-        background: #3578f6;
-        border: none;
-        color: #fff;
-        border-radius: 6px;
-        padding: 6px 14px;
-        font: inherit;
-        cursor: pointer;
+      #dot.connecting {
+        background: var(--warn);
       }
-      #clip,
-      #kbd,
-      #ptr,
-      #full {
-        background: #2a2a2d;
-        border: 1px solid #4a4a4e;
-        border-radius: 6px;
-        padding: 6px 10px;
-        font: inherit;
-        cursor: pointer;
+      #dot.connected {
+        background: var(--ok);
       }
-      #clip:hover,
-      #kbd:hover,
-      #ptr:hover,
-      #full:hover {
-        background: #3a3a3e;
+      #kbd.on,
+      #speaker.on {
+        background: var(--accent);
+        border-color: var(--accent);
       }
-      #kbd.on {
-        background: #3578f6;
-        border-color: #3578f6;
-      }
-      #signal,
-      #secret,
-      #target {
-        width: 150px;
-      }
-      /* Phone layout: full-width inputs, the connect bar stacks. */
-      @media (pointer: coarse) and (max-width: 600px) {
-        #host,
-        #signal,
-        #secret,
-        #target {
-          width: 100%;
-          padding: 10px;
-        }
-        #lan-fields,
-        #rtc-fields {
-          flex: 1 1 100%;
-        }
-        #connect,
-        #clip,
-        #kbd,
-        #ptr,
-        #full {
-          padding: 10px 14px;
-        }
-      }
-      #lan-fields,
-      #rtc-fields {
+      #pair {
         display: inline-flex;
         gap: 8px;
-      }
-      #lan-fields[hidden],
-      #rtc-fields[hidden] {
-        display: none;
       }
       #stats {
         margin-left: auto;
         font-variant-numeric: tabular-nums;
-        color: #9a9aa0;
+        color: var(--muted);
         font-size: 13px;
+      }
+      @media (pointer: coarse) and (max-width: 600px) {
+        #bar .icon {
+          padding: 10px 12px;
+        }
+        #stats {
+          flex: 1 1 100%;
+          margin-left: 0;
+        }
       }
       #stage {
         flex: 1;
@@ -147,6 +372,63 @@
         -webkit-user-select: none;
         user-select: none;
         overscroll-behavior: none;
+      }
+
+      /* ---- files drawer -------------------------------------------------- */
+      #files {
+        position: absolute;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: min(380px, 100vw);
+        box-sizing: border-box;
+        background: var(--panel);
+        border-left: 1px solid var(--line);
+        padding: max(14px, env(safe-area-inset-top)) 16px 16px;
+        overflow-y: auto;
+        z-index: 2;
+        box-shadow: -8px 0 24px rgb(0 0 0 / 40%);
+      }
+      #files .top {
+        margin-bottom: 14px;
+      }
+      .upload {
+        display: block;
+        text-align: center;
+        cursor: pointer;
+      }
+      #files p {
+        margin: 6px 0 16px;
+      }
+      #transfers {
+        list-style: none;
+        padding: 0;
+        margin: 16px 0 0;
+        display: grid;
+        gap: 10px;
+      }
+      .transfer {
+        background: var(--raised);
+        border-radius: 10px;
+        padding: 10px;
+      }
+      .t-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        word-break: break-all;
+      }
+      .transfer progress {
+        width: 100%;
+        height: 6px;
+        margin: 8px 0 4px;
+        accent-color: var(--accent);
+      }
+      .transfer.error .small {
+        color: var(--bad);
+      }
+      .transfer.complete progress {
+        accent-color: var(--ok);
       }
     </style>
   </head>

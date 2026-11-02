@@ -39,6 +39,33 @@ jobs:
       - name: Test (GUI-free crates)
         run: cargo test -p tether-protocol -p tether-signal --locked
 
+  rust-windows:
+    # tetherd's Windows backend (DXGI capture, SendInput, WASAPI) via the
+    # `windows` crate. openh264 is built from source with cc; turbojpeg-sys
+    # needs CMake + NASM; audiopus_sys builds libopus with CMake (preinstalled
+    # on windows-latest; .cargo/config.toml sets CMAKE_POLICY_VERSION_MINIMUM
+    # so CMake 4 accepts it). Formatting is already checked by the macOS job.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build deps
+        uses: ilammy/setup-nasm@v1 # turbojpeg-sys SIMD assembler
+      - name: Check CMake
+        run: cmake --version
+      - name: Build (whole workspace, all targets)
+        run: cargo build --workspace --all-targets --locked
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Hardware-touching tests (WASAPI, clipboard, etc.) are #[ignore]d.
+      # win::tests::this_machine_has_a_monitor relies on the runner's virtual
+      # display being enumerable.
+      - name: Test (whole workspace)
+        run: cargo test --workspace --locked
+
   controller:
     runs-on: ubuntu-latest
     defaults:

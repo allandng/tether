@@ -16,6 +16,11 @@ pub struct PeerInfo {
     pub device_id: String,
     pub name: String,
     pub caps: Caps,
+    /// Host platform ("macos", "windows", "linux"; empty when unreported) —
+    /// lets a controller badge each machine before connecting. Phase 8,
+    /// additive: older peers neither send nor expect it.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub os: String,
 }
 
 /// An ICE server entry shaped for a browser `RTCPeerConnection` (STUN entries
@@ -52,6 +57,9 @@ pub enum ClientMessage {
         pubkey: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         sig: Option<String>,
+        /// Platform, echoed into `PeerInfo.os` (Phase 8; optional).
+        #[serde(skip_serializing_if = "String::is_empty", default)]
+        os: String,
     },
     /// Controller → host. Refused unless the sender can control and the
     /// target is a registered host (the no-mobile-host invariant, enforced
@@ -180,6 +188,7 @@ mod tests {
                 auth: "s3cret".into(),
                 pubkey: None,
                 sig: None,
+                os: String::new(),
             })
             .unwrap(),
             r#"{"type":"register","device_id":"ipad","name":"iPad","caps":{"can_host":false,"can_control":true},"auth":"s3cret"}"#

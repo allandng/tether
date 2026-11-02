@@ -52,6 +52,28 @@ pub struct ServerState {
     pub displays: watch::Receiver<Vec<tether_protocol::DisplayInfo>>,
     /// Controller → capture thread: switch the active display.
     pub select_display: std::sync::mpsc::Sender<u32>,
+    /// This host's display name, announced in `HostInfo`.
+    pub host_name: Arc<str>,
+    /// Where uploads land and how large they may be (Phase 11).
+    pub files: Arc<crate::files::FileConfig>,
+    /// System audio (Phase 10, `--audio`): `None` when off or unavailable.
+    pub audio: Option<crate::audio::AudioFeed>,
+}
+
+impl ServerState {
+    /// The host's Hello, advertising audio only when it will actually send it.
+    pub fn hello(&self) -> tether_protocol::Message {
+        crate::session::host_hello(self.audio.is_some())
+    }
+
+    /// The `HostInfo` this host announces after the handshake.
+    pub fn host_info(&self) -> tether_protocol::Message {
+        tether_protocol::Message::HostInfo(tether_protocol::HostInfo {
+            os: tether_protocol::host_os::current(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            name: self.host_name.to_string(),
+        })
+    }
 }
 
 pub struct Server {

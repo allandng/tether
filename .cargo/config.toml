@@ -4,3 +4,8 @@
 # libswift_Concurrency.dylib at runtime.
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+# libopus (audiopus_sys, Phase 10) declares cmake_minimum_required < 3.5,
+# which CMake 4 refuses outright; this lets it configure on current CMake.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

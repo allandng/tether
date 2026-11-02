@@ -116,8 +116,7 @@ impl PairingAuth {
     }
 
     pub fn default_dir() -> anyhow::Result<PathBuf> {
-        let home = std::env::var_os("HOME").context("HOME not set")?;
-        Ok(PathBuf::from(home).join(".config").join("tether"))
+        crate::config::state_dir()
     }
 
     /// True if no device is paired yet (used for the downgrade decision).
@@ -387,29 +386,47 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-// ---- persistence (unix perms / atomic writes) ---------------------------
+// ---- persistence (owner-only perms / atomic writes) ---------------------
+//
+// Unix: explicit 0700 dir / 0600 files, and a group/world-readable host key
+// is refused. Windows: the state lives under %APPDATA%, whose inherited ACL
+// already grants only the user, SYSTEM and Administrators — the equivalent of
+// 0700 — so no extra ACL work is done there.
 
 fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if !dir.exists() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_owner_only(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{} is group/world-accessible (mode {:o}); refusing to use it",
+            path.display(),
+            mode
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_owner_only(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
 fn load_or_create_host_key(path: &Path) -> anyhow::Result<[u8; 32]> {
-    use std::os::unix::fs::PermissionsExt;
     if path.exists() {
-        let meta = std::fs::metadata(path)?;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            bail!(
-                "{} is group/world-accessible (mode {:o}); refusing to use it",
-                path.display(),
-                mode
-            );
-        }
+        check_owner_only(path)?;
         let bytes = std::fs::read(path)?;
         if bytes.len() != 32 {
             bail!(
@@ -439,22 +456,29 @@ fn load_allowlist(path: &Path) -> anyhow::Result<Allowlist> {
 }
 
 /// Write atomically (tmp + rename) with the given mode, so a crash can't leave
-/// a truncated secret.
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
+/// a truncated secret. `mode` is applied on Unix only (see above).
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let tmp = path.with_extension("tmp");
     {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(mode);
+        }
+        let mut f = opts.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

@@ -43,6 +43,7 @@ pub struct AppState {
 struct Device {
     name: String,
     caps: Caps,
+    os: String,
     conn_id: u64,
     tx: mpsc::Sender<ServerMessage>,
 }
@@ -203,6 +204,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 auth,
                 pubkey,
                 sig,
+                os,
             } => {
                 // Constant-time compare (consistent with the host's token /
                 // pairing-proof checks) to avoid leaking the secret by timing.
@@ -243,6 +245,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     Device {
                         name: name.clone(),
                         caps,
+                        // bounded: it is display-only metadata from the peer
+                        os: os.chars().take(16).collect(),
                         conn_id,
                         tx: tx.clone(),
                     },
@@ -355,6 +359,7 @@ fn broadcast_peers(devices: &HashMap<String, Device>) {
             device_id: id.clone(),
             name: d.name.clone(),
             caps: d.caps,
+            os: d.os.clone(),
         })
         .collect();
     for device in devices.values() {

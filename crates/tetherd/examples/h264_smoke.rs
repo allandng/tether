@@ -1,9 +1,10 @@
-//! H.264 gate measurement: capture the live display for ~5s, hardware-encode,
-//! report fps, average access-unit size, and the effective bitrate.
+//! H.264 gate measurement: capture the live display for ~5s, encode
+//! (VideoToolbox on macOS, OpenH264 on Windows), report fps, average
+//! capture+readback and encode cost, access-unit size, and bitrate.
 //!
 //! Run: cargo run --release -p tetherd --example h264_smoke [bitrate_kbps]
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn main() -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
     use tetherd::capture::{FrameEncoder, ScreenCapturer};
@@ -13,8 +14,19 @@ fn main() -> anyhow::Result<()> {
         .and_then(|a| a.parse().ok())
         .unwrap_or(4000);
 
-    let mut capturer = tetherd::capture::macos::SckCapturer::main_display(30)?;
-    let mut encoder = tetherd::encode::h264::VtH264Encoder::new(bitrate_kbps)?;
+    #[cfg(target_os = "macos")]
+    let (mut capturer, mut encoder) = (
+        tetherd::capture::macos::SckCapturer::main_display(30)?,
+        tetherd::encode::h264::VtH264Encoder::new(bitrate_kbps)?,
+    );
+    #[cfg(windows)]
+    let (mut capturer, mut encoder) = {
+        tetherd::win::init_dpi_awareness();
+        (
+            tetherd::capture::windows::DxgiCapturer::primary(30)?,
+            tetherd::encode::h264_soft::OpenH264Encoder::new(bitrate_kbps)?,
+        )
+    };
     let resolution = capturer.resolution();
     println!(
         "capturing {}x{} at target {bitrate_kbps} kbps ...",
@@ -25,8 +37,11 @@ fn main() -> anyhow::Result<()> {
     let mut frames = 0u32;
     let mut bytes = 0usize;
     let mut encode_total = Duration::ZERO;
+    let mut capture_total = Duration::ZERO;
     while start.elapsed() < Duration::from_secs(5) {
+        let t = Instant::now();
         let raw = capturer.next_frame()?;
+        capture_total += t.elapsed();
         let t = Instant::now();
         let au = encoder.encode(&raw)?;
         encode_total += t.elapsed();
@@ -36,8 +51,9 @@ fn main() -> anyhow::Result<()> {
 
     let secs = start.elapsed().as_secs_f64();
     println!(
-        "{frames} frames in {secs:.2}s = {:.1} fps | avg encode {:.1} ms | avg AU {} KiB | {:.2} Mbps",
+        "{frames} frames in {secs:.2}s = {:.1} fps | avg capture wait+readback {:.1} ms | avg encode {:.1} ms | avg AU {} KiB | {:.2} Mbps",
         frames as f64 / secs,
+        capture_total.as_secs_f64() * 1000.0 / frames.max(1) as f64,
         encode_total.as_secs_f64() * 1000.0 / frames.max(1) as f64,
         bytes / frames.max(1) as usize / 1024,
         (bytes as f64 * 8.0) / secs / 1_000_000.0,
@@ -45,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn main() {
-    eprintln!("h264_smoke is macOS-only");
+    eprintln!("h264_smoke supports macOS and Windows only");
 }

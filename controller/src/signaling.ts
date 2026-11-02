@@ -11,6 +11,8 @@ export interface PeerInfo {
   device_id: string;
   name: string;
   caps: Caps;
+  /** Host platform ("macos" | "windows" | "linux"); absent from older hosts. */
+  os?: string;
 }
 
 export interface IceServer {

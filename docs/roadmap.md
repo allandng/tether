@@ -24,6 +24,14 @@ Phases 6–11 close that gap.
 Order: 6 → 7 → 8 → 9, then 10 and 11 in either order. Phase 6 is genuinely
 blocking. Phases 10 and 11 are features you can ship without.
 
+**Status (Phases 7–11 landed):** every phase has a gate-results doc
+([7](phase7-gate-results.md), [8](phase8-gate-results.md),
+[9](phase9-gate-results.md), [10](phase10-gate-results.md),
+[11](phase11-gate-results.md)). What remains is verification that needs
+hardware or money rather than code: phone/iPad and installed-PWA passes, a live
+WAN + TURN run, a Mac run of the new code, the macOS system-audio capturer,
+and Apple/Windows code-signing identities.
+
 ## What already exists that these phases build on
 
 Worth stating, because three of the six phases are smaller than they sound:

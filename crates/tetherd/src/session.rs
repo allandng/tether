@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use futures_util::{SinkExt, StreamExt};
 use tether_protocol::{
-    AuthResult, CAP_CAN_CONTROL, CAP_CAN_HOST, ClipboardData, Decoded, Displays, FrameData, Hello,
-    Message, PROTOCOL_VERSION, PairResult, Role,
+    AuthResult, CAP_AUDIO, CAP_CAN_CONTROL, CAP_CAN_HOST, CAP_FILES, ClipboardData, Decoded,
+    Displays, FrameData, Hello, Message, PROTOCOL_VERSION, PairResult, Role,
 };
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -14,6 +14,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
 use crate::auth::{PairOutcome, PairingAuth};
+use crate::files::{FileTransfers, is_file_message};
 use crate::input::InjectCommand;
 use crate::server::{AuthPolicy, ServerState};
 
@@ -70,9 +71,15 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
         )
         .await?;
     }
+    // ...and what this host is (OS for the controller's modifier policy).
+    send(&mut ws, &state.host_info()).await?;
+
+    let (mut files, mut files_out) = FileTransfers::new(state.files.clone(), peer.to_string());
 
     loop {
         tokio::select! {
+            Some(msg) = files_out.control.recv() => send(&mut ws, &msg).await?,
+            Some(msg) = files_out.data.recv() => send(&mut ws, &msg).await?,
             changed = frames.changed() => {
                 if changed.is_err() {
                     bail!("frame source closed");
@@ -117,7 +124,12 @@ pub async fn run(stream: TcpStream, peer: SocketAddr, state: ServerState) -> any
                         info!(%peer, "controller disconnected");
                         return Ok(());
                     }
-                    Some(Ok(WsMessage::Binary(bytes))) => handle_incoming(&bytes, &state).await,
+                    Some(Ok(WsMessage::Binary(bytes))) => match Message::decode(&bytes) {
+                        Ok(Decoded::Message { message, .. }) if is_file_message(&message) => {
+                            files.handle(message).await;
+                        }
+                        _ => handle_incoming(&bytes, &state).await,
+                    },
                     Some(Ok(_)) => {} // text/ping/pong: ignore (tungstenite answers pings)
                     Some(Err(e)) => {
                         info!(%peer, error = %e, "connection error, ending session");
@@ -185,11 +197,17 @@ pub fn validate_controller_hello(hello: &Hello) -> Result<(), String> {
     Ok(())
 }
 
-pub fn host_hello() -> Message {
+/// The host's Hello. `audio`: this host will attach a system-audio track
+/// (WebRTC only — the LAN transport never carries audio).
+pub fn host_hello(audio: bool) -> Message {
+    let mut capabilities = CAP_CAN_HOST | CAP_CAN_CONTROL | CAP_FILES;
+    if audio {
+        capabilities |= CAP_AUDIO;
+    }
     Message::Hello(Hello {
         version: PROTOCOL_VERSION,
         role: Role::Host,
-        capabilities: CAP_CAN_HOST | CAP_CAN_CONTROL,
+        capabilities,
     })
 }
 
@@ -283,7 +301,8 @@ async fn handshake(ws: &mut Ws) -> anyhow::Result<Hello> {
         .await
         .context("handshake timed out")??;
     validate_controller_hello(&hello).map_err(anyhow::Error::msg)?;
-    send(ws, &host_hello()).await?;
+    // no audio over LAN: there is no media-track concept on a WebSocket
+    send(ws, &host_hello(false)).await?;
     Ok(hello)
 }
 

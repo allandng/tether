@@ -100,6 +100,12 @@ async fn full_pipeline_sustains_gate_framerate() {
             controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             displays: pipeline.displays,
             select_display: pipeline.select_display,
+            host_name: "test-host".into(),
+            files: std::sync::Arc::new(tetherd::files::FileConfig {
+                dir: std::env::temp_dir().join("tether-test-uploads"),
+                max_upload_bytes: 1 << 30,
+            }),
+            audio: None,
         },
     )
     .await
@@ -170,7 +176,7 @@ async fn full_pipeline_sustains_gate_framerate() {
                 ..
             } => {}
             Decoded::Message {
-                message: Message::Displays(_),
+                message: Message::Displays(_) | Message::HostInfo(_),
                 ..
             } => {}
             other => panic!("unexpected: {other:?}"),

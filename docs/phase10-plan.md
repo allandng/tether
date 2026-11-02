@@ -149,5 +149,4 @@ host can log why audio is absent rather than leaving it a mystery.
 
 ---
 
-**Status: planned, not started. Depends on Phase 7 for the Windows half.
-Independent of Phases 8 and 9.**
+**Status: done (Windows half; the macOS capturer is still open) — see [phase10-gate-results.md](phase10-gate-results.md).**

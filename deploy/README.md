@@ -2,8 +2,8 @@
 
 This directory stands up the public half of Tether on one small server: TLS,
 the controller bundle, the signaling server, and a TURN relay, all on one
-hostname. The host daemon (`tetherd`) stays on your Mac and is never exposed —
-it dials out to the signal server.
+hostname. The host daemon (`tetherd`) stays on your Mac or PC and is never
+exposed — it dials out to the signal server.
 
 Three containers, defined in `docker-compose.yml`:
 
@@ -94,24 +94,43 @@ docker compose logs -f caddy    # watch the certificate get issued
 
 The `signal` image builds from the repository root as its context, because the
 binary is compiled from the workspace. Only `tether-signal` is built —
-`tetherd` is macOS-only and is not, and cannot be, part of this image. On a
+`tetherd` is a desktop host (macOS or Windows) and is not, and cannot be, part
+of this image. On a
 working checkout the build context includes `target/`, which is large and slow
 to send to the daemon; build from a clean clone on the server, or add a
 `.dockerignore` for it.
 
 ## Pointing a host at it
 
-On the Mac, give `tetherd` the full URL — scheme included, `/ws` path included:
+On the host, give `tetherd` the full URL — scheme included, `/ws` path included:
 
 ```sh
 tetherd --signal wss://tether.example.com/ws --secret <TETHER_SECRET> \
         --codec h264 --bitrate-kbps 4000
 ```
 
-In the controller, open `https://tether.example.com`, choose **Signaled**,
-enter the same secret and the host's device id. The TURN credentials are minted
-by the signal server at registration and handed to both sides — there is
-nothing to configure per-device for the relay.
+For a host that runs as a service, store the same settings once with
+`tetherd setup --signal wss://tether.example.com/ws` (it prompts for the
+secret and writes `config.toml`, so the secret never sits on a command line);
+`packaging/windows/install.ps1` does this for you on Windows. Then
+`tetherd pair` prints a one-time pairing code from the running daemon.
+
+## Connecting from a phone or browser
+
+Open `https://tether.example.com`. On first visit, tap **⚙ Settings** and enter
+the secret; the signal server field defaults to the page's own origin, which is
+exactly what this single-origin stack serves, so it can stay as it is. Your
+machines then appear in the list with live online/offline state. Tap one to
+connect; the first time, it asks for the pairing code `tetherd pair` printed,
+and after that it reconnects with one tap.
+
+The controller is installable as a PWA: **Add to Home Screen** (iOS Safari's
+Share menu, or the install prompt in Chrome/Edge) gives it its own icon and a
+full-screen window.
+
+The TURN credentials are minted by the signal server at registration and
+handed to both sides — there is nothing to configure per-device for the
+relay.
 
 ## Verifying the relay actually works
 

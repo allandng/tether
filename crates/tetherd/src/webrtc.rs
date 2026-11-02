@@ -33,9 +33,19 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
+use crate::audio::AudioFeed;
+use crate::files::{FileTransfers, is_file_message};
 use crate::input::InjectCommand;
 use crate::server::ServerState;
-use crate::session::{host_hello, validate_controller_hello};
+use crate::session::validate_controller_hello;
+use webrtc::api::interceptor_registry::register_default_interceptors;
+use webrtc::api::media_engine::{MIME_TYPE_OPUS, MediaEngine};
+use webrtc::interceptor::registry::Registry;
+use webrtc::media::Sample;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::track::track_local::TrackLocal;
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
 // ---------------------------------------------------------------------------
 // Frame chunking — byte-identical to controller/src/chunks.ts:
@@ -268,6 +278,7 @@ async fn signal_session(
                         auth: config.secret.clone(),
                         pubkey: Some(pubkey),
                         sig: Some(sig),
+                        os: tether_protocol::host_os::name().into(),
                     })?;
                 }
                 ServerMessage::Registered {
@@ -382,7 +393,15 @@ async fn answer_offer(
     ice_servers: Vec<RTCIceServer>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<Arc<RTCPeerConnection>> {
-    let api = APIBuilder::new().build();
+    // Opus is registered even without --audio so that an offer carrying an
+    // audio m-line (any current controller) negotiates cleanly either way.
+    let mut media = MediaEngine::default();
+    media.register_default_codecs()?;
+    let registry = register_default_interceptors(Registry::new(), &mut media)?;
+    let api = APIBuilder::new()
+        .with_media_engine(media)
+        .with_interceptor_registry(registry)
+        .build();
     let pc = Arc::new(
         api.new_peer_connection(RTCConfiguration {
             ice_servers,
@@ -419,15 +438,19 @@ async fn answer_offer(
     // clipboard without ever passing the auth gate. `authed` is the shared
     // gate: the ctl channel flips it true on success; dropping the sender
     // (auth failure / ctl never opens) makes the other pumps bail.
+    let (authed_tx, authed_rx) = watch::channel(false);
+    let audio_authed = authed_rx.clone();
     {
         let state = state.clone();
         let pc_for_dc = Arc::clone(&pc);
-        let (authed_tx, authed_rx) = watch::channel(false);
+        // the controller's signal device id, for the file-transfer audit log
+        let peer_label = from.clone();
         let mut authed_tx = Some(authed_tx);
         let mut ctl_shutdown = Some(shutdown_rx);
         pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let state = state.clone();
             let pc_for_dc = Arc::clone(&pc_for_dc);
+            let peer = peer_label.clone();
             let ctl_authed_tx = authed_tx.take(); // moved to the (single) ctl channel
             let ctl_shutdown = ctl_shutdown.take();
             let authed_rx = authed_rx.clone();
@@ -438,13 +461,24 @@ async fn answer_offer(
                         wire_ctl_channel(dc, state, pc_for_dc.clone(), ctl_authed_tx, ctl_shutdown)
                     }
                     "tether-media" => wire_media_channel(dc, state.clone(), authed_rx),
-                    "tether-bulk" => wire_bulk_channel(dc, state, authed_rx),
+                    "tether-bulk" => wire_bulk_channel(dc, state, authed_rx, peer),
                     other => debug!(label = %other, "ignoring unexpected data channel"),
                 }
             })
         }));
     }
 
+    // System audio (Phase 10): only if this host has it AND the offer has an
+    // audio m-line to answer on — an older controller's offer doesn't, and
+    // a track then would need a renegotiation it can't do. Attached before
+    // the offer is applied (see attach_audio).
+    match (&state.audio, offer_wants_audio(&offer_sdp)) {
+        (Some(feed), true) => attach_audio(&pc, feed.clone(), audio_authed).await?,
+        (Some(_), false) => {
+            info!("controller offered no audio m-line (older controller); no audio")
+        }
+        _ => {}
+    }
     pc.set_remote_description(RTCSessionDescription::offer(offer_sdp)?)
         .await?;
     let answer = pc.create_answer(None).await?;
@@ -454,6 +488,82 @@ async fn answer_offer(
         sdp: answer.sdp,
     })?;
     Ok(pc)
+}
+
+/// Does this SDP offer have an audio section the host can send on?
+pub fn offer_wants_audio(sdp: &str) -> bool {
+    sdp.lines().any(|l| l.starts_with("m=audio"))
+}
+
+/// Add an Opus track and pump the shared audio feed into it — but only once
+/// the ctl channel has authenticated this peer, exactly like the media and
+/// bulk pumps. Ends when the peer connection goes away.
+async fn attach_audio(
+    pc: &Arc<RTCPeerConnection>,
+    feed: AudioFeed,
+    mut authed: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let track = Arc::new(TrackLocalStaticSample::new(
+        RTCRtpCodecCapability {
+            mime_type: MIME_TYPE_OPUS.to_owned(),
+            clock_rate: crate::audio::SAMPLE_RATE,
+            channels: crate::audio::CHANNELS as u16,
+            ..Default::default()
+        },
+        "audio".to_owned(),
+        "tether".to_owned(),
+    ));
+    // Must run *before* the offer is applied: set_remote_description then
+    // matches the offer's recvonly audio section to this local send
+    // transceiver (by kind and direction). Added afterwards, the track would
+    // get a new transceiver the answer never negotiates, and the transceiver
+    // the offer created can't take a track (webrtc-rs gives it no send
+    // encoding), so the audio would go nowhere.
+    let sender = pc
+        .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
+        .await
+        .context("adding the audio track")?;
+    // Drain RTCP so the interceptors (NACK, reports) keep working.
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 1500];
+        while sender.read(&mut buf).await.is_ok() {}
+    });
+    let pc = Arc::downgrade(pc);
+    tokio::spawn(async move {
+        if !await_authed(&mut authed).await {
+            return;
+        }
+        info!("streaming system audio to controller");
+        let mut packets = feed.subscribe();
+        loop {
+            let data = match packets.recv().await {
+                Ok(p) => p,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    debug!(skipped = n, "audio pump behind; skipping packets");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            let alive = pc.upgrade().is_some_and(|pc| {
+                !matches!(
+                    pc.connection_state(),
+                    RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed
+                )
+            });
+            if !alive {
+                return;
+            }
+            let sample = Sample {
+                data,
+                duration: crate::audio::FRAME_DURATION,
+                ..Default::default()
+            };
+            if track.write_sample(&sample).await.is_err() {
+                return;
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Derive the pairing channel binding from the negotiated DTLS fingerprints,
@@ -568,7 +678,7 @@ fn wire_ctl_channel(
             let _ = pc.close().await;
             return;
         }
-        if dc.send(&host_hello().encode()).await.is_err() {
+        if dc.send(&state.hello().encode()).await.is_err() {
             return;
         }
 
@@ -633,6 +743,9 @@ fn wire_ctl_channel(
                 return;
             }
         }
+        if dc.send(&state.host_info().encode()).await.is_err() {
+            return;
+        }
         info!("webrtc controller connected");
 
         loop {
@@ -690,13 +803,27 @@ fn wire_ctl_channel(
     });
 }
 
-/// Bulk channel: messages too large for a single data-channel message
-/// (SCTP implementations cap at ~64 KiB), carried via the same chunk framing
-/// as media. Clipboard both directions today; file transfer later.
-fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch::Receiver<bool>) {
-    // inbound: reassemble → decode → dispatch (clipboard only, for now).
-    // Dropped until the peer is authenticated, so an unpaired peer can't write
-    // the host pasteboard.
+/// Bulk channel: messages too large for, or too bulky to share, the control
+/// channel — clipboard (both directions) and file transfer (Phase 11) — in the
+/// same chunk framing as media. Inbound and outbound each run as one ordered
+/// stream: the controller's reassembler is latest-wins per bulk sequence
+/// number, so every outbound message's chunks must go out back to back, which
+/// is why one writer task owns the channel's send side.
+fn wire_bulk_channel(
+    dc: Arc<RTCDataChannel>,
+    state: ServerState,
+    authed: watch::Receiver<bool>,
+    peer: String,
+) {
+    /// Pause file data above this much queued in the SCTP send buffer, so a
+    /// large transfer neither balloons memory nor starves the media channel.
+    const BULK_HIGH_WATER: usize = 1024 * 1024;
+
+    let (files, mut files_out) = FileTransfers::new(state.files.clone(), format!("webrtc:{peer}"));
+    let (file_in_tx, mut file_in_rx) = mpsc::channel::<Message>(64);
+    // inbound: reassemble → decode → clipboard straight to the host board,
+    // file messages to the engine task. Dropped until the peer is
+    // authenticated, so an unpaired peer can't write the pasteboard or disk.
     let reassembler = Arc::new(Mutex::new(FrameReassembler::default()));
     {
         let state = state.clone();
@@ -705,11 +832,11 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch:
             let reassembler = reassembler.clone();
             let state = state.clone();
             let authed_in = authed_in.clone();
+            let file_in_tx = file_in_tx.clone();
             Box::pin(async move {
                 if !*authed_in.borrow() {
-                    return; // not authenticated yet — ignore inbound clipboard
+                    return; // not authenticated yet — ignore
                 }
-                debug!(len = msg.data.len(), "bulk chunk received");
                 let Some(wire) = reassembler.lock().await.on_chunk(&msg.data) else {
                     return;
                 };
@@ -720,13 +847,42 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch:
                     }) => {
                         let _ = state.clipboard_in.send(c.text);
                     }
-                    other => debug!(?other, "ignoring non-clipboard bulk message"),
+                    Ok(Decoded::Message { message, .. }) if is_file_message(&message) => {
+                        // Awaiting here backpressures the SCTP reader while the
+                        // engine writes to disk.
+                        let _ = file_in_tx.send(message).await;
+                    }
+                    other => debug!(?other, "ignoring unexpected bulk message"),
                 }
             })
         }));
     }
 
-    // outbound: host clipboard, chunked; includes the current value at open
+    // the engine: one per peer, owns in-flight transfers. Dropped — deleting
+    // partial uploads and stopping downloads — when the channel closes.
+    let closed = Arc::new(tokio::sync::Notify::new());
+    {
+        let closed = closed.clone();
+        dc.on_close(Box::new(move || {
+            closed.notify_one();
+            Box::pin(async {})
+        }));
+    }
+    tokio::spawn(async move {
+        let mut files = files;
+        loop {
+            tokio::select! {
+                _ = closed.notified() => break,
+                msg = file_in_rx.recv() => match msg {
+                    Some(msg) => files.handle(msg).await,
+                    None => break,
+                },
+            }
+        }
+    });
+
+    // outbound writer: host clipboard (current value at open, then changes),
+    // engine replies, and download chunks — control before data.
     let mut authed = authed;
     let opened = Arc::new(tokio::sync::Notify::new());
     {
@@ -744,12 +900,27 @@ fn wire_bulk_channel(dc: Arc<RTCDataChannel>, state: ServerState, authed: watch:
         let mut clipboard = state.clipboard_out.clone();
         clipboard.mark_changed();
         let mut bulk_seq: u32 = 0;
-        while clipboard.changed().await.is_ok() {
-            let text = clipboard.borrow_and_update().clone();
-            let Some(text) = text else { continue };
+        loop {
+            let (msg, is_data) = tokio::select! {
+                biased;
+                changed = clipboard.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let text = clipboard.borrow_and_update().clone();
+                    let Some(text) = text else { continue };
+                    (Message::ClipboardData(ClipboardData { text }), false)
+                }
+                Some(msg) = files_out.control.recv() => (msg, false),
+                Some(msg) = files_out.data.recv() => (msg, true),
+            };
+            if is_data {
+                while dc.buffered_amount().await > BULK_HIGH_WATER {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
             bulk_seq = bulk_seq.wrapping_add(1);
-            let wire = Message::ClipboardData(ClipboardData { text }).encode();
-            for chunk in chunk_frame(bulk_seq, &wire) {
+            for chunk in chunk_frame(bulk_seq, &msg.encode()) {
                 if dc.send(&chunk).await.is_err() {
                     return; // channel closed; session is ending
                 }
