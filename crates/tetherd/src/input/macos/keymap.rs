@@ -2,8 +2,13 @@
 //! ANSI layout). The DOM code identifies the *physical* key, which is exactly
 //! what virtual key codes describe, so this mapping is layout-independent.
 
-/// Returns `None` for keys macOS has no virtual key code for (browser/media
-/// keys); callers should log and drop those.
+/// Returns `None` for keys macOS has no virtual key code for (browser keys,
+/// media keys — see [`dom_code_to_media_key`]); callers should log and drop
+/// those. `CapsLock` is deliberately absent: it is a lock *state*, synced from
+/// the modifiers byte, and a synthetic kVK_CapsLock (0x39) neither toggles it
+/// reliably nor composes with that sync (it would double-toggle). The
+/// injector handles the `CapsLock` key event itself — including toggling the
+/// lock for senders that predate the lock bits (`LegacyCapsKey`).
 pub fn dom_code_to_vk(code: &str) -> Option<u16> {
     let vk = match code {
         "KeyA" => 0x00,
@@ -62,7 +67,6 @@ pub fn dom_code_to_vk(code: &str) -> Option<u16> {
         "MetaRight" => 0x36,
         "MetaLeft" => 0x37,
         "ShiftLeft" => 0x38,
-        "CapsLock" => 0x39,
         "AltLeft" => 0x3A,
         "ControlLeft" => 0x3B,
         "ShiftRight" => 0x3C,
@@ -127,6 +131,25 @@ pub fn dom_code_to_vk(code: &str) -> Option<u16> {
     Some(vk)
 }
 
+/// W3C `KeyboardEvent.code` → `NX_KEYTYPE_*` (IOKit/hidsystem/ev_keymap.h).
+/// macOS has no virtual key codes for media/volume keys; hardware posts them as
+/// NSSystemDefined aux-control-button events carrying this key type. The
+/// legacy `Volume*` spellings are what older Firefox sends.
+pub fn dom_code_to_media_key(code: &str) -> Option<u8> {
+    let key_type = match code {
+        "AudioVolumeUp" | "VolumeUp" => 0,     // NX_KEYTYPE_SOUND_UP
+        "AudioVolumeDown" | "VolumeDown" => 1, // NX_KEYTYPE_SOUND_DOWN
+        "AudioVolumeMute" | "VolumeMute" => 7, // NX_KEYTYPE_MUTE
+        "MediaPlayPause" => 16,                // NX_KEYTYPE_PLAY
+        "MediaTrackNext" => 17,                // NX_KEYTYPE_NEXT
+        "MediaTrackPrevious" => 18,            // NX_KEYTYPE_PREVIOUS
+        "MediaFastForward" => 19,              // NX_KEYTYPE_FAST
+        "MediaRewind" => 20,                   // NX_KEYTYPE_REWIND
+        _ => return None,
+    };
+    Some(key_type)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +171,25 @@ mod tests {
         assert_eq!(dom_code_to_vk("MediaPlayPause"), None);
         assert_eq!(dom_code_to_vk(""), None);
         assert_eq!(dom_code_to_vk("NotAKey"), None);
+        assert_eq!(dom_code_to_media_key("KeyA"), None);
+    }
+
+    #[test]
+    fn caps_lock_is_not_a_postable_key() {
+        assert_eq!(dom_code_to_vk("CapsLock"), None);
+    }
+
+    #[test]
+    fn media_keys_map_to_nx_key_types() {
+        assert_eq!(dom_code_to_media_key("AudioVolumeUp"), Some(0));
+        assert_eq!(dom_code_to_media_key("VolumeDown"), Some(1));
+        assert_eq!(dom_code_to_media_key("AudioVolumeMute"), Some(7));
+        assert_eq!(dom_code_to_media_key("MediaPlayPause"), Some(16));
+        assert_eq!(dom_code_to_media_key("MediaTrackNext"), Some(17));
+        assert_eq!(dom_code_to_media_key("MediaTrackPrevious"), Some(18));
+        // Media keys never also resolve to a keyboard virtual key.
+        for code in ["AudioVolumeUp", "MediaPlayPause", "MediaTrackNext"] {
+            assert_eq!(dom_code_to_vk(code), None, "{code}");
+        }
     }
 }

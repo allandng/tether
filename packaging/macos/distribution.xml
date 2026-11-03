@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  productbuild distribution for the Tether host package. build-pkg.sh fills
+  in the version and the architectures (`lipo -archs` of the built binary)
+  where the double-underscore placeholders stand below. Wrapping the
+  pkgbuild component in a product archive lets Installer
+  refuse up front, with a clear message, on a Mac that can't run tetherd:
+  macOS 26+ (the binary links macOS 26 SDK APIs) and the CPU it was built for.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>Tether Host</title>
+    <pkg-ref id="com.tether.host"/>
+    <options customize="never" require-scripts="false" hostArchitectures="__ARCHS__"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="26.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.tether.host"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.tether.host" visible="false">
+        <pkg-ref id="com.tether.host"/>
+    </choice>
+    <pkg-ref id="com.tether.host" version="__VERSION__" onConclusion="none">tether-host-component.pkg</pkg-ref>
+</installer-gui-script>

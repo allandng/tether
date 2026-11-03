@@ -8,6 +8,8 @@ use crate::capture::{FrameEncoder, RawFrame};
 pub mod h264;
 #[cfg(windows)]
 pub mod h264_soft;
+#[cfg(any(target_os = "macos", test))]
+mod sps;
 #[cfg(any(windows, test))]
 pub mod yuv;
 
@@ -33,16 +35,19 @@ impl FrameEncoder for JpegEncoder {
     }
 
     fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes> {
-        let image = turbojpeg::Image {
-            pixels: frame.bgra.as_slice(),
-            width: frame.width as usize,
-            pitch: frame.bytes_per_row,
-            height: frame.height as usize,
-            format: turbojpeg::PixelFormat::BGRA,
-        };
-        let buf = self
-            .compressor
-            .compress_to_owned(image)
+        let (width, height) = (frame.width as usize, frame.height as usize);
+        let compressor = &mut self.compressor;
+        // BGRA read in place (a capture pixel buffer is locked meanwhile).
+        let buf = frame
+            .with_bgra(|pixels, pitch| {
+                compressor.compress_to_owned(turbojpeg::Image {
+                    pixels,
+                    width,
+                    pitch,
+                    height,
+                    format: turbojpeg::PixelFormat::BGRA,
+                })
+            })?
             .context("jpeg encode")?;
         Ok(Bytes::copy_from_slice(&buf))
     }
@@ -65,13 +70,7 @@ mod tests {
                 bgra[o + 3] = 255;
             }
         }
-        RawFrame {
-            width,
-            height,
-            bytes_per_row,
-            bgra,
-            timestamp_micros: 0,
-        }
+        RawFrame::from_bgra(width, height, bytes_per_row, bgra, 0)
     }
 
     #[test]
@@ -93,6 +92,28 @@ mod tests {
             right - left > 100,
             "blue gradient lost: left={left} right={right}"
         );
+    }
+
+    /// JPEG mode on macOS: the capturer hands over BGRA pixel buffers,
+    /// read in place with their own (padded) pitch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn encodes_a_bgra_pixel_buffer_like_the_same_bytes() {
+        use crate::capture::pixel_buffer::PixelBuffer;
+        let bytes = test_frame(61, 48); // odd width: the IOSurface pads its rows
+        let crate::capture::Pixels::Bgra {
+            data,
+            bytes_per_row,
+        } = &bytes.pixels
+        else {
+            unreachable!()
+        };
+        let surface = RawFrame::from_pixel_buffer(
+            PixelBuffer::from_bgra(61, 48, data, *bytes_per_row).unwrap(),
+            0,
+        );
+        let mut enc = JpegEncoder::new(75).unwrap();
+        assert_eq!(enc.encode(&surface).unwrap(), enc.encode(&bytes).unwrap());
     }
 
     #[test]

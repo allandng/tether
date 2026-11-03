@@ -9,8 +9,12 @@
 //! behind skips packets rather than stalling the others. With no subscribers
 //! the encoder is skipped entirely.
 //!
+//! Platform capturers: WASAPI loopback on Windows (`audio::windows`),
+//! ScreenCaptureKit on macOS (`audio::macos`).
+//!
 //! The audio clock is kept continuous: loopback capture delivers nothing
-//! while nothing plays, so the gap is filled with silence frames — the RTP
+//! while nothing plays (WASAPI), and any capturer can stall or cold-start
+//! slowly (ScreenCaptureKit), so the gap is filled with silence frames — the RTP
 //! timestamps then track wall-clock time and playback resumes in sync.
 //!
 //! Opt-in (`--audio`): on by default it would stream a room's sound to
@@ -20,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -150,9 +154,71 @@ pub fn keep_on_clock(pending: &mut Vec<f32>, produced: u64, expected: u64) -> u6
     produced
 }
 
+/// A capturer that errors sooner than this after it was built counts as a
+/// failed start, like `make` failing: a stream that dies right away (or keeps
+/// tripping a stall watchdog) is backed off, not rebuilt in a tight loop.
+pub const HEALTHY_RUN: Duration = Duration::from_secs(10);
+/// First retry delay; it doubles per consecutive failure up to [`MAX_RETRY`].
+const FIRST_RETRY: Duration = Duration::from_secs(2);
+const MAX_RETRY: Duration = Duration::from_secs(16);
+
+/// Why a capturer is being rebuilt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureEnd {
+    /// `make` failed.
+    StartFailed,
+    /// `read` errored after the capturer had run for this long.
+    Lost(Duration),
+    /// The default output device changed (rebuild to follow it).
+    DeviceChanged,
+}
+
+/// What the audio thread does before the next `make`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    /// Consecutive failures so far (carried to the next decision).
+    pub failures: u32,
+    /// Sleep this long first.
+    pub delay: Duration,
+    /// Log this one at warn level (the rest are throttled to debug).
+    pub warn: bool,
+}
+
+/// The rebuild policy, given the consecutive failures before this end. A
+/// failed start and a capturer lost within [`HEALTHY_RUN`] are both failures:
+/// back off (2 s, doubling to 16 s) and warn on the first and every 30th. A
+/// capturer lost after a healthy run is rebuilt at once (warned: it's news),
+/// and a device change is not a failure at all.
+pub fn retry_after(failures: u32, end: CaptureEnd) -> Retry {
+    match end {
+        CaptureEnd::DeviceChanged => Retry {
+            failures,
+            delay: Duration::ZERO,
+            warn: false,
+        },
+        CaptureEnd::Lost(ran) if ran >= HEALTHY_RUN => Retry {
+            failures: 0,
+            delay: Duration::ZERO,
+            warn: true,
+        },
+        CaptureEnd::StartFailed | CaptureEnd::Lost(_) => {
+            let failures = failures.saturating_add(1);
+            let doublings = (failures - 1).min(16);
+            Retry {
+                failures,
+                delay: FIRST_RETRY.saturating_mul(1 << doublings).min(MAX_RETRY),
+                warn: failures == 1 || failures.is_multiple_of(30),
+            }
+        }
+    }
+}
+
 /// Start the capture → encode thread. `make` builds the platform capturer on
-/// that thread (COM objects are thread-affine) and is called again to follow
-/// a device change or recover from an error.
+/// that thread, so the capturer need not be `Send` (WASAPI's COM objects are
+/// thread-affine), and is called again to follow a device change or recover
+/// from an error — with a growing delay while it keeps failing to start or
+/// dying young (e.g. no Screen Recording permission yet, or the display
+/// asleep, on macOS); see [`retry_after`].
 pub fn start<C, F>(mut make: F) -> std::io::Result<AudioFeed>
 where
     C: SystemAudioCapturer,
@@ -181,31 +247,44 @@ where
             let mut failures = 0u32;
             loop {
                 let mut capturer = match make() {
-                    Ok(c) => {
-                        failures = 0;
-                        c
-                    }
+                    Ok(c) => c,
                     Err(e) => {
-                        failures += 1;
-                        if failures == 1 || failures.is_multiple_of(30) {
-                            warn!(error = %e, "system audio capture unavailable; retrying");
+                        let retry = retry_after(failures, CaptureEnd::StartFailed);
+                        failures = retry.failures;
+                        if retry.warn {
+                            warn!(error = %e, failures, "system audio capture unavailable; retrying");
+                        } else {
+                            debug!(error = %e, failures, "system audio capture unavailable; retrying");
                         }
-                        std::thread::sleep(Duration::from_secs(2));
+                        std::thread::sleep(retry.delay);
                         continue;
                     }
                 };
                 let (rate, channels) = capturer.format();
-                info!(rate, channels, "system audio capture started");
+                if failures <= 1 {
+                    info!(rate, channels, "system audio capture started");
+                } else {
+                    debug!(rate, channels, failures, "system audio capture started");
+                }
                 let mut resampler = Resampler::new(rate, channels);
                 let start = Instant::now();
                 let mut produced: u64 = 0; // stereo frames at 48 kHz
                 let mut last_device_check = Instant::now();
-                loop {
+                let end = loop {
                     std::thread::sleep(Duration::from_millis(10));
+                    if failures > 0 && start.elapsed() >= HEALTHY_RUN {
+                        info!(after = failures, "system audio capture recovered");
+                        failures = 0;
+                    }
                     raw.clear();
                     if let Err(e) = capturer.read(&mut raw) {
-                        warn!(error = %e, "audio capture lost; rebuilding");
-                        break;
+                        let end = CaptureEnd::Lost(start.elapsed());
+                        if retry_after(failures, end).warn {
+                            warn!(error = %e, "audio capture lost; rebuilding");
+                        } else {
+                            debug!(error = %e, failures, "audio capture lost; rebuilding");
+                        }
+                        break end;
                     }
                     let before = pending.len();
                     resampler.process(&raw, &mut pending);
@@ -227,11 +306,16 @@ where
                         last_device_check = Instant::now();
                         if capturer.device_changed() {
                             info!("default audio output changed; following it");
-                            break;
+                            break CaptureEnd::DeviceChanged;
                         }
                     }
-                }
+                };
+                // Tear the capturer down before any back-off sleep.
+                drop(capturer);
                 pending.clear();
+                let retry = retry_after(failures, end);
+                failures = retry.failures;
+                std::thread::sleep(retry.delay);
             }
         })?;
     Ok(feed)
@@ -246,11 +330,20 @@ pub fn start_platform() -> std::io::Result<AudioFeed> {
     start(windows::WasapiLoopback::default_device)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub mod macos;
+
+/// The platform capturer for `--audio`, if this platform has one.
+#[cfg(target_os = "macos")]
+pub fn start_platform() -> std::io::Result<AudioFeed> {
+    start(macos::SckAudio::system_mix)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn start_platform() -> std::io::Result<AudioFeed> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "system audio capture is implemented for Windows hosts only so far",
+        "system audio capture is implemented for Windows and macOS hosts only",
     ))
 }
 
@@ -316,6 +409,94 @@ mod tests {
         let mut p = vec![0.5; (ms(250) * 2) as usize];
         assert_eq!(keep_on_clock(&mut p, ms(1300), ms(1000)), ms(1050));
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn failed_starts_and_young_deaths_back_off_healthy_losses_do_not() {
+        let s = Duration::from_secs;
+        // make() failing: 2 s, doubling, capped at 16 s; warn 1st and every 30th
+        let mut failures = 0;
+        let mut delays = Vec::new();
+        let mut warned = Vec::new();
+        for _ in 0..60 {
+            let r = retry_after(failures, CaptureEnd::StartFailed);
+            failures = r.failures;
+            delays.push(r.delay.as_secs());
+            if r.warn {
+                warned.push(failures);
+            }
+        }
+        assert_eq!(delays[..6], [2, 4, 8, 16, 16, 16]);
+        assert_eq!(warned, vec![1, 30, 60]);
+
+        // a capturer that started fine but died within HEALTHY_RUN is a
+        // failure too — the stream-dies-right-after-starting loop
+        assert_eq!(
+            retry_after(0, CaptureEnd::Lost(Duration::from_millis(30))),
+            Retry {
+                failures: 1,
+                delay: s(2),
+                warn: true
+            }
+        );
+        // ...including one that keeps tripping a 5 s stall watchdog
+        let r = retry_after(1, CaptureEnd::Lost(s(5)));
+        assert_eq!((r.failures, r.delay, r.warn), (2, s(4), false));
+        // and it accumulates across start failures and young deaths alike
+        let r = retry_after(r.failures, CaptureEnd::StartFailed);
+        assert_eq!((r.failures, r.delay), (3, s(8)));
+
+        // lost after a healthy run: rebuild at once, counter reset, warned
+        assert_eq!(
+            retry_after(7, CaptureEnd::Lost(HEALTHY_RUN)),
+            Retry {
+                failures: 0,
+                delay: Duration::ZERO,
+                warn: true
+            }
+        );
+        // a device change is not a failure
+        assert_eq!(
+            retry_after(3, CaptureEnd::DeviceChanged),
+            Retry {
+                failures: 3,
+                delay: Duration::ZERO,
+                warn: false
+            }
+        );
+        // no overflow at the extremes
+        let r = retry_after(u32::MAX, CaptureEnd::StartFailed);
+        assert_eq!((r.failures, r.delay), (u32::MAX, s(16)));
+    }
+
+    /// Starts fine, errors on the first read.
+    struct DiesAtOnce;
+
+    impl SystemAudioCapturer for DiesAtOnce {
+        fn format(&self) -> (u32, usize) {
+            (48_000, 2)
+        }
+        fn read(&mut self, _: &mut Vec<f32>) -> anyhow::Result<()> {
+            anyhow::bail!("stream stopped")
+        }
+    }
+
+    #[test]
+    fn a_capturer_that_dies_at_once_is_not_rebuilt_in_a_tight_loop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let makes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&makes);
+        let _feed = start(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(DiesAtOnce)
+        })
+        .unwrap();
+        // one read (~10 ms) then a 2 s back-off: without it this would be
+        // ~50 rebuilds by now
+        std::thread::sleep(Duration::from_millis(500));
+        let n = makes.load(Ordering::SeqCst);
+        assert_eq!(n, 1, "rebuilt {n} times in 500 ms");
     }
 
     struct Sine {

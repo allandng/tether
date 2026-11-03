@@ -46,13 +46,13 @@ impl ScreenCapturer for SyntheticCapturer {
                 bgra[o + 2] = 64;
             }
         }
-        Ok(RawFrame {
-            width: self.width,
-            height: self.height,
+        Ok(RawFrame::from_bgra(
+            self.width,
+            self.height,
             bytes_per_row,
             bgra,
-            timestamp_micros: self.tick as u64,
-        })
+            self.tick as u64,
+        ))
     }
 }
 

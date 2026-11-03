@@ -1,8 +1,13 @@
 //! macOS clipboard via NSPasteboard. Constructed on the sync thread;
 //! NSPasteboard is not main-thread-only and these calls are documented safe
 //! off the main thread.
+//!
+//! That thread is a plain std thread that polls forever, with no run loop
+//! and so no autorelease pool draining: every AppKit call runs inside its own
+//! [`autoreleasepool`], or autoreleased temporaries (the strings and type
+//! arrays NSPasteboard hands back) would pile up for the daemon's lifetime.
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_foundation::NSString;
 
@@ -15,7 +20,7 @@ pub struct MacClipboard {
 impl MacClipboard {
     pub fn new() -> Self {
         MacClipboard {
-            pasteboard: NSPasteboard::generalPasteboard(),
+            pasteboard: autoreleasepool(|_| NSPasteboard::generalPasteboard()),
         }
     }
 }
@@ -28,30 +33,36 @@ impl Default for MacClipboard {
 
 impl Clipboard for MacClipboard {
     fn change_count(&mut self) -> i64 {
-        self.pasteboard.changeCount() as i64
+        autoreleasepool(|_| self.pasteboard.changeCount() as i64)
     }
 
     fn read_text(&mut self) -> Option<String> {
-        // SAFETY: NSPasteboardTypeString is a valid static type identifier.
-        let s = unsafe { self.pasteboard.stringForType(NSPasteboardTypeString) }?;
-        Some(s.to_string())
+        autoreleasepool(|_| {
+            // SAFETY: NSPasteboardTypeString is a valid static type identifier.
+            let s = unsafe { self.pasteboard.stringForType(NSPasteboardTypeString) }?;
+            // Copied out into a Rust String before the pool drains.
+            Some(s.to_string())
+        })
     }
 
     fn write_text(&mut self, text: &str) -> i64 {
-        let ns = NSString::from_str(text);
-        // SAFETY: clearContents must precede setString (pasteboard ownership
-        // protocol); both are valid calls on the general pasteboard.
-        unsafe {
-            let _ = self.pasteboard.clearContents();
-            if !self
-                .pasteboard
-                .setString_forType(&ns, NSPasteboardTypeString)
-            {
-                tracing::warn!("NSPasteboard setString failed");
+        autoreleasepool(|_| {
+            let ns = NSString::from_str(text);
+            // SAFETY: clearContents must precede setString (pasteboard
+            // ownership protocol); both are valid calls on the general
+            // pasteboard.
+            unsafe {
+                let _ = self.pasteboard.clearContents();
+                if !self
+                    .pasteboard
+                    .setString_forType(&ns, NSPasteboardTypeString)
+                {
+                    tracing::warn!("NSPasteboard setString failed");
+                }
+                // Read back rather than guess how many bumps the write produced.
+                self.pasteboard.changeCount() as i64
             }
-            // Read back rather than guess how many bumps the write produced.
-            self.pasteboard.changeCount() as i64
-        }
+        })
     }
 }
 

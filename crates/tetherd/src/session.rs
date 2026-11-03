@@ -19,6 +19,11 @@ use crate::input::InjectCommand;
 use crate::server::{AuthPolicy, ServerState};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a refused controller has to send its pairing code, measured from
+/// the start of auth. A person reads the code off the host and types it, so
+/// the handshake's 5 s is far too short; bounded (as on WebRTC) so a peer
+/// can't hold the controller slot forever.
+const PAIRING_WINDOW: Duration = Duration::from_secs(90);
 
 type Ws = WebSocketStream<TcpStream>;
 
@@ -239,8 +244,12 @@ pub fn handle_auth_message(
     now_unix: u64,
 ) -> (Option<Message>, AuthDecision) {
     // The gate is active once a device is paired or pairing is required, unless
-    // explicitly overridden for dev/LAN.
-    let gate_active = !policy.allow_unpaired && (policy.require_pairing || !auth.is_empty());
+    // explicitly overridden for dev/LAN — and while a pairing code is armed:
+    // the operator ran `--pair`/`tetherd pair` to pair a device, so the
+    // controller must be asked for the code rather than waved through
+    // unpaired (which would leave the host with no paired device at all).
+    let gate_active = !policy.allow_unpaired
+        && (policy.require_pairing || !auth.is_empty() || auth.code_armed(now_unix));
 
     match msg {
         Message::Auth(a) => {
@@ -311,8 +320,12 @@ async fn handshake(ws: &mut Ws) -> anyhow::Result<Hello> {
 /// authenticated or refused.
 async fn auth_gate(ws: &mut Ws, state: &ServerState) -> anyhow::Result<()> {
     let binding = ws_channel_binding();
+    let started = tokio::time::Instant::now();
+    // The controller sends Auth straight away; after a refusal the next
+    // message waits on a person typing the pairing code.
+    let mut deadline = started + HANDSHAKE_TIMEOUT;
     loop {
-        let msg = timeout(HANDSHAKE_TIMEOUT, read_message(ws))
+        let msg = tokio::time::timeout_at(deadline, read_message(ws))
             .await
             .context("auth timed out")??;
         let (response, decision) = {
@@ -331,7 +344,7 @@ async fn auth_gate(ws: &mut Ws, state: &ServerState) -> anyhow::Result<()> {
         match decision {
             AuthDecision::Proceed => return Ok(()),
             AuthDecision::Reject => bail!("controller failed authentication"),
-            AuthDecision::Continue => {}
+            AuthDecision::Continue => deadline = started + PAIRING_WINDOW,
         }
     }
 }
@@ -373,4 +386,48 @@ async fn send(ws: &mut Ws, msg: &Message) -> anyhow::Result<()> {
     ws.send(WsMessage::Binary(msg.encode()))
         .await
         .context("websocket send failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tether_protocol::Auth;
+
+    fn unpaired_auth() -> Message {
+        Message::Auth(Auth {
+            device_id: "phone".into(),
+            token: String::new(),
+        })
+    }
+
+    fn decide(auth: &mut PairingAuth, policy: AuthPolicy, now: u64) -> AuthDecision {
+        handle_auth_message(auth, policy, &unpaired_auth(), &ws_channel_binding(), now).1
+    }
+
+    #[test]
+    fn an_armed_code_asks_unpaired_controllers_to_pair() {
+        let dir = std::env::temp_dir().join(format!("tether-gate-{}", std::process::id()));
+        let mut auth = PairingAuth::load_or_create(&dir).unwrap();
+        let open = AuthPolicy {
+            require_pairing: false,
+            allow_unpaired: false,
+        };
+        assert!(auth.is_empty());
+        // nothing paired, nothing armed: the first-run LAN path stays open
+        assert_eq!(decide(&mut auth, open, 1000), AuthDecision::Proceed);
+
+        // `--pair` / `tetherd pair`: the controller must be asked for the code
+        auth.arm(1000);
+        assert_eq!(decide(&mut auth, open, 1001), AuthDecision::Continue);
+        // ... unless the operator explicitly opted out of pairing
+        let dev = AuthPolicy {
+            allow_unpaired: true,
+            ..open
+        };
+        assert_eq!(decide(&mut auth, dev, 1001), AuthDecision::Proceed);
+
+        // once the code expires unused, the host is back to its first-run state
+        assert_eq!(decide(&mut auth, open, 1000 + 300), AuthDecision::Proceed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

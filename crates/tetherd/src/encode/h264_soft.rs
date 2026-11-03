@@ -120,8 +120,8 @@ impl FrameEncoder for OpenH264Encoder {
     fn encode(&mut self, frame: &RawFrame) -> anyhow::Result<Bytes> {
         let (w, h) = (frame.width as usize, frame.height as usize);
         let scale = if w > MAX_W || h > MAX_H { 2 } else { 1 };
-        self.yuv
-            .convert_from(&frame.bgra, w, h, frame.bytes_per_row, scale);
+        let yuv = &mut self.yuv;
+        frame.with_bgra(|bgra, pitch| yuv.convert_from(bgra, w, h, pitch, scale))?;
         let dims = (self.yuv.width, self.yuv.height);
         if dims != self.dims {
             // OpenH264 reinitialises (and emits an IDR) on a size change —
@@ -186,13 +186,7 @@ mod tests {
             let v = if in_box { 255 } else { texture };
             px.copy_from_slice(&[v, v / 2, 128, 255]);
         }
-        RawFrame {
-            width: w,
-            height: h,
-            bytes_per_row: (w * 4) as usize,
-            bgra,
-            timestamp_micros: 0,
-        }
+        RawFrame::from_bgra(w, h, (w * 4) as usize, bgra, 0)
     }
 
     #[test]

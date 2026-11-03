@@ -352,6 +352,55 @@ async fn pairing_lifecycle() {
     );
 }
 
+/// Pairing waits on a person reading the code off the host and typing it:
+/// the host must not drop the session after the 5 s handshake timeout.
+#[tokio::test]
+async fn pairing_code_can_take_longer_than_the_handshake() {
+    let host = start_host_with(AuthPolicy {
+        require_pairing: true,
+        allow_unpaired: false,
+    })
+    .await;
+    let mut ws = connect(host.addr).await;
+    ws.send(controller_hello()).await.unwrap();
+    assert!(matches!(
+        next_message(&mut ws).await,
+        Some(Message::Hello(_))
+    ));
+    send_msg(
+        &mut ws,
+        &Message::Auth(Auth {
+            device_id: "phone".into(),
+            token: String::new(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        next_message(&mut ws).await,
+        Some(Message::AuthResult(AuthResult { ok: false }))
+    );
+
+    // the person runs `tetherd pair` and types the code: longer than 5 s
+    let code = host.auth.lock().await.arm(tetherd::auth::now_unix());
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    send_msg(
+        &mut ws,
+        &Message::PairRequest(PairRequest {
+            device_id: "phone".into(),
+            name: "Phone".into(),
+            proof: pairing_proof(&code, &ws_channel_binding()),
+        }),
+    )
+    .await;
+    assert!(
+        matches!(
+            next_message(&mut ws).await,
+            Some(Message::PairResult(PairResult { ok: true, .. }))
+        ),
+        "session dropped while the code was being typed"
+    );
+}
+
 /// A wrong pairing code is consumed on the first attempt (no brute force).
 #[tokio::test]
 async fn wrong_pairing_code_is_single_use() {
