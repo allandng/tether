@@ -28,16 +28,34 @@ jobs:
         run: cargo fmt --all --check
       - name: Install build deps
         run: brew install nasm # turbojpeg-sys SIMD assembler
-      - name: Build (whole workspace, incl. tetherd)
-        run: cargo build --workspace --locked
+      - name: Build (whole workspace, all targets)
+        run: cargo build --workspace --all-targets --locked
       - name: Clippy (warnings are errors)
-        run: cargo clippy --workspace --locked -- -D warnings
-      # tether-protocol + tether-signal are GUI-free. tetherd's capture /
-      # encode / clipboard / injection tests need a logged-in GUI session
-      # (Screen Recording, VideoToolbox, NSPasteboard) that headless CI lacks,
-      # so they are run locally during gate verification, not here.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test (GUI-free crates)
         run: cargo test -p tether-protocol -p tether-signal --locked
+      # tetherd's real capture / VideoToolbox / pasteboard / injection tests
+      # need a logged-in GUI session with TCC grants that CI lacks
+      # (encode::h264::, clipboard::macos::), so they run locally during gate
+      # verification. Everything below is pure logic, a fake capturer or
+      # loopback networking (real-hardware tests inside these modules, e.g.
+      # audio::macos's ScreenCaptureKit ones, are #[ignore]d). The module
+      # filters are an allowlist: a new test module runs here only once it is
+      # added (and known not to need a GUI) — check with
+      # `cargo test -p tetherd --lib -- --list`.
+      - name: Test (tetherd, GUI-free unit tests)
+        run: >-
+          cargo test -p tetherd --lib --locked --
+          adaptive:: audio::tests:: audio::macos::tests:: auth::
+          capture::tests:: capture::macos::tests:: capture::pixel_buffer::tests::
+          clipboard::tests:: config::
+          control:: encode::tests:: encode::yuv:: files:: input::macos::tests::
+          keymap:: macos_perms:: pipeline:: webrtc::
+      # e2e_fake is left out: its ≥15 fps gate is CPU-bound in a debug build
+      # (synthetic fill + JPEG per frame) and the hosted macOS VM measures
+      # ~7.5 fps. The Windows job still gates on it; run it locally on a Mac.
+      - name: Test (tetherd integration, fake capture + loopback)
+        run: cargo test -p tetherd --locked --test connection --test webrtc_e2e
 
   rust-windows:
     # tetherd's Windows backend (DXGI capture, SendInput, WASAPI) via the
