@@ -15,6 +15,51 @@ export interface DisplayedRect {
 /** Maximum local pinch-zoom factor. */
 const MAX_ZOOM = 4;
 
+/**
+ * Where content of size contentW×contentH sits inside a boxW×boxH box under
+ * `object-fit: contain` (letterbox/pillarbox bars), relative to the box.
+ */
+export function containRect(boxW: number, boxH: number, contentW: number, contentH: number): DisplayedRect {
+  const contentAspect = contentW / Math.max(1, contentH);
+  const boxAspect = boxW / Math.max(1, boxH);
+  if (boxAspect > contentAspect) {
+    // pillarbox
+    const width = boxH * contentAspect;
+    return { left: (boxW - width) / 2, top: 0, width, height: boxH };
+  }
+  // letterbox
+  const height = boxW / contentAspect;
+  return { left: 0, top: (boxH - height) / 2, width: boxW, height };
+}
+
+/**
+ * Clamp a zoom pan (`translate(tx,ty) scale(scale)`, origin 0 0) so it never
+ * exposes empty space: on an axis where the scaled `content` (untransformed
+ * box coordinates, from {@link containRect}) is smaller than the box it stays
+ * centered, otherwise its edges may not cross into the box.
+ */
+export function clampPan(
+  scale: number,
+  tx: number,
+  ty: number,
+  boxW: number,
+  boxH: number,
+  content: DisplayedRect,
+): { tx: number; ty: number } {
+  if (scale === 1) return { tx: 0, ty: 0 };
+  const axis = (t: number, off: number, len: number, box: number) => {
+    const scaledOff = off * scale;
+    const scaledLen = len * scale;
+    if (scaledLen <= box) {
+      // content still smaller than the box on this axis → keep it centered
+      return (box - scaledLen) / 2 - scaledOff;
+    }
+    // content covers the box → keep its edges from crossing inward
+    return clamp(t, box - scaledOff - scaledLen, -scaledOff) || 0; // no -0
+  };
+  return { tx: axis(tx, content.left, content.width, boxW), ty: axis(ty, content.top, content.height, boxH) };
+}
+
 export class Viewer {
   private readonly ctx: CanvasRenderingContext2D;
   private decoding = false;
@@ -34,12 +79,24 @@ export class Viewer {
   private pinch: { s0: number; fx0: number; fy0: number; pfx: number; pfy: number } | null = null;
 
   private cursorEl: HTMLDivElement | null = null;
+  // the dot's content point, as a fraction of the displayed rect, so it can
+  // follow the content through zoom, pan and rotation
+  private cursorAt: { fx: number; fy: number } | null = null;
+
+  /** Called when the view goes in or out of zoom (scale ≠ 1), e.g. to show
+   * a reset affordance. */
+  onZoomedChange: ((zoomed: boolean) => void) | null = null;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("no 2d context");
     this.ctx = ctx;
     this.canvas.style.transformOrigin = "0 0";
+  }
+
+  /** Current local zoom factor (1 = fit). */
+  get zoom(): number {
+    return this.scale;
   }
 
   /**
@@ -49,6 +106,11 @@ export class Viewer {
    */
   setCursor(clientX: number, clientY: number): void {
     if (typeof document === "undefined") return;
+    const r = this.displayedRect();
+    this.cursorAt = {
+      fx: (clientX - r.left) / Math.max(1, r.width),
+      fy: (clientY - r.top) / Math.max(1, r.height),
+    };
     if (!this.cursorEl) {
       const el = document.createElement("div");
       Object.assign(el.style, {
@@ -73,6 +135,83 @@ export class Viewer {
 
   hideCursor(): void {
     if (this.cursorEl) this.cursorEl.style.display = "none";
+  }
+
+  get cursorVisible(): boolean {
+    return this.cursorEl?.style.display === "block";
+  }
+
+  /** Re-place a shown dot over its content point after the view moved,
+   * held inside the visible stage (where the trackpad cursor re-clamps to). */
+  private repositionCursor(): void {
+    if (!this.cursorEl || !this.cursorAt || !this.cursorVisible) return;
+    const r = this.displayedRect();
+    const v = this.visibleRect();
+    const x = clamp(r.left + this.cursorAt.fx * r.width, v.left, v.left + v.width);
+    const y = clamp(r.top + this.cursorAt.fy * r.height, v.top, v.top + v.height);
+    this.cursorEl.style.left = `${x}px`;
+    this.cursorEl.style.top = `${y}px`;
+  }
+
+  /**
+   * The part of the screen the remote view can be seen in, client px: the
+   * stage box (which clips a zoomed canvas) cut by the visual viewport (soft
+   * keyboard, browser chrome).
+   */
+  visibleRect(): DisplayedRect {
+    // the canvas fills its stage; the stage's box is the untransformed view
+    const host = this.canvas.parentElement ?? this.canvas;
+    let r: DisplayedRect = host.getBoundingClientRect();
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    if (vv) {
+      const left = Math.max(r.left, vv.offsetLeft);
+      const top = Math.max(r.top, vv.offsetTop);
+      const right = Math.min(r.left + r.width, vv.offsetLeft + vv.width);
+      const bottom = Math.min(r.top + r.height, vv.offsetTop + vv.height);
+      if (right > left && bottom > top) r = { left, top, width: right - left, height: bottom - top };
+    }
+    return { left: r.left, top: r.top, width: r.width, height: r.height };
+  }
+
+  /**
+   * Re-fit after the stage changed size (rotation, resize, soft keyboard):
+   * re-clamp the pan to the new box and put the cursor dot back over its
+   * content point. A live pinch is left alone; its end clamps.
+   */
+  relayout(): void {
+    // a hidden view (0×0 box) would "clamp" the pan away; keep it for later
+    const shown = this.canvas.clientWidth > 1 && this.canvas.clientHeight > 1;
+    if (!this.pinch && shown) this.clampPan();
+    this.repositionCursor();
+  }
+
+  /** Back to the fitted 1× view. */
+  resetZoom(): void {
+    this.pinch = null;
+    this.setTransform(1, 0, 0);
+  }
+
+  /**
+   * Shift the zoomed view by (dx, dy) client px, clamped like any pan;
+   * returns the shift actually applied (zero when not zoomed).
+   */
+  panBy(dx: number, dy: number): { dx: number; dy: number } {
+    if (this.scale === 1 || this.pinch) return { dx: 0, dy: 0 };
+    const { tx, ty } = this.clampedPan(this.tx + dx, this.ty + dy);
+    const applied = { dx: tx - this.tx, dy: ty - this.ty };
+    this.setTransform(this.scale, tx, ty);
+    return applied;
+  }
+
+  /**
+   * Call before a new connection's frames arrive (reconnect, another host):
+   * its H.264 stream must start at a keyframe, not continue the decoder state
+   * the previous connection left behind — those deltas would reference
+   * pictures this decoder never saw and draw garbage until the next keyframe.
+   */
+  resetStream(): void {
+    this.h264?.restart();
+    this.pending = null;
   }
 
   setResolution(resolution: Resolution): void {
@@ -111,6 +250,7 @@ export class Viewer {
   }
 
   private setTransform(scale: number, tx: number, ty: number): void {
+    const wasZoomed = this.scale !== 1;
     this.scale = scale;
     this.tx = tx;
     this.ty = ty;
@@ -121,6 +261,8 @@ export class Viewer {
     } else {
       this.canvas.style.transform = `translate(${this.tx}px, ${this.ty}px) scale(${scale})`;
     }
+    if (wasZoomed !== (scale !== 1)) this.onZoomedChange?.(scale !== 1);
+    this.repositionCursor();
   }
 
   /**
@@ -130,35 +272,16 @@ export class Viewer {
    * Works in untransformed layout space (clientWidth/Height are transform-
    * agnostic), mirroring the displayedRect aspect math.
    */
-  private clampPan(): void {
-    if (this.scale === 1) return;
+  private clampedPan(tx: number, ty: number): { tx: number; ty: number } {
     const boxW = this.canvas.clientWidth;
     const boxH = this.canvas.clientHeight;
-    const contentAspect = this.canvas.width / Math.max(1, this.canvas.height);
-    const boxAspect = boxW / Math.max(1, boxH);
-    let cw = boxW;
-    let ch = boxH;
-    let ox = 0;
-    let oy = 0;
-    if (boxAspect > contentAspect) {
-      cw = boxH * contentAspect; // pillarbox
-      ox = (boxW - cw) / 2;
-    } else {
-      ch = boxW / contentAspect; // letterbox
-      oy = (boxH - ch) / 2;
-    }
-    const clampAxis = (t: number, off: number, len: number, box: number) => {
-      const scaledOff = off * this.scale;
-      const scaledLen = len * this.scale;
-      if (scaledLen <= box) {
-        // content still smaller than the box on this axis → keep it centered
-        return (box - scaledLen) / 2 - scaledOff;
-      }
-      // content covers the box → keep its edges from crossing inward
-      return clamp(t, box - scaledOff - scaledLen, -scaledOff);
-    };
-    const tx = clampAxis(this.tx, ox, cw, boxW);
-    const ty = clampAxis(this.ty, oy, ch, boxH);
+    const content = containRect(boxW, boxH, this.canvas.width, this.canvas.height);
+    return clampPan(this.scale, tx, ty, boxW, boxH, content);
+  }
+
+  private clampPan(): void {
+    if (this.scale === 1) return;
+    const { tx, ty } = this.clampedPan(this.tx, this.ty);
     this.setTransform(this.scale, tx, ty);
   }
 
@@ -178,7 +301,7 @@ export class Viewer {
         (videoFrame, captureMicros) => this.drawVideoFrame(videoFrame, captureMicros),
         (detail) => console.warn(detail),
       );
-      this.h264.push(frame.payload, frame.timestampMicros);
+      this.h264.push(frame.payload, frame.timestampMicros, frame.seq);
       return;
     }
     if (this.decoding) {
@@ -218,16 +341,8 @@ export class Viewer {
    */
   displayedRect(): DisplayedRect {
     const bounds = this.canvas.getBoundingClientRect();
-    const contentAspect = this.canvas.width / Math.max(1, this.canvas.height);
-    const boxAspect = bounds.width / Math.max(1, bounds.height);
-    if (boxAspect > contentAspect) {
-      // pillarbox
-      const width = bounds.height * contentAspect;
-      return { left: bounds.left + (bounds.width - width) / 2, top: bounds.top, width, height: bounds.height };
-    }
-    // letterbox
-    const height = bounds.width / contentAspect;
-    return { left: bounds.left, top: bounds.top + (bounds.height - height) / 2, width: bounds.width, height };
+    const r = containRect(bounds.width, bounds.height, this.canvas.width, this.canvas.height);
+    return { left: bounds.left + r.left, top: bounds.top + r.top, width: r.width, height: r.height };
   }
 
   private async decodeAndDraw(frame: FrameData): Promise<void> {

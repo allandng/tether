@@ -52,6 +52,9 @@ export interface Transport {
   /** Submit a host pairing code (after onPairingRequired). */
   submitPairingCode(code: string): void;
   readonly connected: boolean;
+  /** Date.now() of the last message received on any channel (0 before the
+   * first): the evidence that the link is alive (lifecycle.ts). */
+  readonly lastRxAt: number;
 }
 
 /** Pause file data while this much is queued unsent on the transport. */
@@ -60,6 +63,7 @@ export const FILE_HIGH_WATER = 1024 * 1024;
 export class TetherConnection implements Transport {
   private ws: WebSocket | null = null;
   private session: ProtocolSession | null = null;
+  lastRxAt = 0;
 
   constructor(
     private readonly events: ConnectionEvents,
@@ -110,6 +114,7 @@ export class TetherConnection implements Transport {
 
     ws.onopen = () => session.start();
     ws.onmessage = (event: MessageEvent) => {
+      this.lastRxAt = Date.now();
       if (event.data instanceof ArrayBuffer) session.onMessage(event.data);
     };
     ws.onclose = () => {

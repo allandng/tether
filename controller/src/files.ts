@@ -40,8 +40,9 @@ export interface Transfer {
 export interface FileOptions {
   /** Largest download collected in memory (no streaming writer). */
   maxMemoryDownload: number;
-  /** Hand a completed in-memory download to the user. */
-  save(name: string, blob: Blob): void;
+  /** Hand a completed in-memory download to the user (`id` names its row,
+   * which may keep the Blob for a later "Save…" tap). */
+  save(name: string, blob: Blob, id: number): void;
 }
 
 interface Upload {
@@ -298,7 +299,7 @@ export class FileTransfers {
           (e) => this.update(dl.t, { state: "error", error: `could not save: ${e}` }),
         );
     } else {
-      this.opts.save(dl.t.name, new Blob(dl.parts as BlobPart[]));
+      this.opts.save(dl.t.name, new Blob(dl.parts as BlobPart[]), dl.t.id);
       dl.parts = [];
       this.update(dl.t, { state: "complete" });
     }

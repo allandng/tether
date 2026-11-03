@@ -3,19 +3,22 @@
 //   list    — your machines, live online/offline from the signal directory,
 //             one tap to connect; plus "connect by address" for the LAN path.
 //   session — the remote screen and its controls (display picker, clipboard,
-//             files, keyboard, pointer mode, fullscreen), with a back action.
+//             files, keyboard, pointer mode, fullscreen), with a back action;
+//             compact with an overflow sheet on phones/tablets (sessionbar.ts).
 //
 // Settings (signal server + secret) are entered once and persisted; the
 // signal URL defaults to the origin this page was served from, which is what
 // the single-origin deployment in deploy/ provides.
 
-import { HostClipboard, PasteFlow } from "./clipboard";
+import { HostClipboard, PasteFlow, PasteSheet, pasteModifiers, readLocalClipboard } from "./clipboard";
 import { type ConnectionEvents, TetherConnection, type Transport } from "./connection";
 import { Directory, type DirectoryState } from "./directory";
+import { ExtraKeys, KeyToolbar, chord } from "./extrakeys";
 import { type DownloadWriter, FileTransfers, type Transfer, baseName, formatBytes } from "./files";
 import type { Mode } from "./gestures";
 import { attachInput } from "./input";
 import { SoftKeyboard } from "./keyboard";
+import { ResumeProbe, resumeAction, watchLifecycle } from "./lifecycle";
 import {
   type MachineRow,
   type SavedMachines,
@@ -27,9 +30,15 @@ import {
 } from "./machines";
 import { tokenStore } from "./pairing";
 import type { InputEvent } from "./protocol";
+import { INSTALL_HINT_KEY, isIos, requestPersistentStorage, shouldShowInstallHint } from "./pwa";
 import { cmdActsAsCtrl, isAppleClient, remapInput } from "./remap";
+import { relayoutSession, setRelayoutHandler, watchLayout } from "./relayout";
+import { chooseSaveStrategy, fileFor, shareFile } from "./save";
+import { setupSessionBar } from "./sessionbar";
 import { type PeerInfo, signalUrl } from "./signaling";
 import { Viewer } from "./viewer";
+import { trackVisualViewport } from "./viewport";
+import { ScreenWakeLock, syncOnUserActivation } from "./wakelock";
 import { WebRtcTransport } from "./webrtc";
 
 /** Coarse pointer + narrow viewport ⇒ phone/tablet; pick trackpad on phones. */
@@ -75,12 +84,18 @@ function setup(): void {
         <span id="dir-state" class="muted"></span>
         <button id="open-settings" class="icon" title="Settings" aria-label="Settings">⚙</button>
       </header>
+      <div id="install-hint" class="hint" hidden>
+        <p><strong>Install Tether:</strong> tap Share, then <em>Add to Home Screen</em>.
+          Safari may clear a tab's settings and pairings after a week unused; the app keeps them.
+          The installed app has storage of its own, so set up and pair your machines there.</p>
+        <button id="install-dismiss" class="icon small" type="button" aria-label="Dismiss">✕</button>
+      </div>
       <ul id="machines"></ul>
       <div id="empty" class="empty" hidden></div>
       <details id="lan-box">
         <summary>Connect by address (LAN)</summary>
         <form id="lan-form">
-          <input id="lan-host" type="text" placeholder="192.168.1.20:7878" spellcheck="false" autocomplete="off" />
+          <input id="lan-host" type="text" placeholder="192.168.1.20:7878" inputmode="url" enterkeyhint="go" autocorrect="off" autocapitalize="off" spellcheck="false" autocomplete="off" />
           <button class="primary" type="submit">Connect</button>
         </form>
       </details>
@@ -90,21 +105,31 @@ function setup(): void {
       <div id="bar">
         <button id="back" class="icon" title="Back to machines" aria-label="Back">←</button>
         <span id="dot" class="closed"></span>
-        <span id="title"></span>
-        <select id="display" hidden title="Active display"></select>
-        <button id="clip" class="icon" hidden title="Copy host clipboard to this device">📋</button>
-        <button id="files-btn" class="icon" hidden title="Files">📁</button>
-        <button id="speaker" class="icon" hidden title="Host audio (muted)">🔇</button>
+        <span id="ident"><span id="title"></span><span id="stats"></span></span>
         <button id="kbd" class="icon" hidden title="Toggle keyboard">⌨</button>
         <button id="ptr" class="icon" hidden title="Pointer mode">🖱</button>
-        <button id="full" class="icon" hidden title="Fullscreen">⛶</button>
+        <div id="more">
+          <select id="display" hidden title="Active display" aria-label="Active display"></select>
+          <button id="clip" class="icon" hidden title="Copy host clipboard to this device" aria-label="Copy host clipboard" data-label="Copy host clipboard" data-attn>📋</button>
+          <button id="files-btn" class="icon" hidden title="Files" aria-label="Files" data-label="Files">📁</button>
+          <button id="speaker" class="icon" hidden title="Host audio (muted)" data-label="Host audio">🔇</button>
+          <button id="full" class="icon" hidden title="Fullscreen" aria-label="Fullscreen" data-label="Fullscreen">⛶</button>
+          <button id="autohide" class="icon sheet-only" title="Hide the bar after a few seconds; tap the tab at the top to bring it back" aria-label="Auto-hide bar" aria-pressed="false" data-label="Auto-hide bar">⤒</button>
+          <button id="bar-settings" class="icon sheet-only" title="Settings" aria-label="Settings" data-label="Settings">⚙</button>
+        </div>
+        <div id="more-scrim"></div>
+        <button id="more-btn" class="icon" title="More controls" aria-label="More controls" aria-controls="more" aria-expanded="false">⋯</button>
         <span id="pair" hidden>
-          <input id="paircode" type="text" placeholder="pairing code" spellcheck="false" autocomplete="off" />
+          <input id="paircode" type="text" placeholder="pairing code" enterkeyhint="go" autocorrect="off" autocapitalize="characters" spellcheck="false" autocomplete="off" />
           <button id="pairgo" class="primary">Pair</button>
         </span>
-        <span id="stats"></span>
       </div>
-      <div id="stage"><canvas id="view" tabindex="0"></canvas></div>
+      <button id="bar-handle" hidden title="Show controls" aria-label="Show controls"></button>
+      <div id="stage">
+        <canvas id="view" tabindex="0"></canvas>
+        <button id="zoom-reset" hidden title="Reset zoom" aria-label="Reset zoom">1×</button>
+      </div>
+      <div id="xkeys" hidden></div>
       <audio id="host-audio" autoplay playsinline muted></audio>
       <aside id="files" hidden>
         <header class="top">
@@ -114,7 +139,7 @@ function setup(): void {
         <label class="primary upload">Upload to host…<input id="upload" type="file" multiple hidden /></label>
         <p class="muted small">Uploads land in the host's Downloads folder.</p>
         <form id="download-form">
-          <input id="download-path" type="text" placeholder="Host file path, e.g. C:\\Users\\me\\report.pdf" spellcheck="false" autocomplete="off" />
+          <input id="download-path" type="text" placeholder="Host file path, e.g. C:\\Users\\me\\report.pdf" enterkeyhint="go" autocorrect="off" autocapitalize="off" spellcheck="false" autocomplete="off" />
           <button class="primary" type="submit">Download</button>
         </form>
         <ul id="transfers"></ul>
@@ -125,7 +150,7 @@ function setup(): void {
       <form method="dialog" id="settings-form">
         <h2>Settings</h2>
         <label>Signal server
-          <input id="set-signal" type="text" placeholder="tether.example.com" spellcheck="false" autocomplete="off" />
+          <input id="set-signal" type="text" placeholder="tether.example.com" inputmode="url" autocorrect="off" autocapitalize="off" spellcheck="false" autocomplete="off" />
         </label>
         <label>Secret
           <input id="set-secret" type="password" autocomplete="off" />
@@ -302,11 +327,28 @@ function setup(): void {
     renderList();
   });
 
+  // ---- install hint (iOS browser tab; see pwa.ts) --------------------------
+  const ios = isIos(navigator);
+  const installHint = $<HTMLDivElement>("#install-hint");
+  installHint.hidden = !shouldShowInstallHint({
+    userAgent: navigator.userAgent,
+    maxTouchPoints: navigator.maxTouchPoints,
+    standalone: (navigator as Navigator & { standalone?: boolean }).standalone,
+    displayModeStandalone:
+      typeof matchMedia !== "undefined" && matchMedia("(display-mode: standalone)").matches,
+    dismissed: store.get(INSTALL_HINT_KEY) === "1",
+  });
+  $("#install-dismiss").addEventListener("click", () => {
+    store.set(INSTALL_HINT_KEY, "1");
+    installHint.hidden = true;
+  });
+
   // ---- session --------------------------------------------------------------
   const viewer = new Viewer(canvas);
   const RECONNECT_BASE_MS = 1000;
   const RECONNECT_MAX_MS = 30_000;
   let status = "closed";
+  let statusSince = Date.now(); // when `status` last changed (lifecycle.ts)
   let wantConnection = false; // user intent: reconnect on unexpected drops
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectDelay = RECONNECT_BASE_MS; // grows on repeated failure, resets on connect
@@ -316,9 +358,15 @@ function setup(): void {
   let cmdAsCtrl = false;
   let files: FileTransfers | null = null;
   const appleClient = isAppleClient();
+  // Held while connected so a phone that's only watching doesn't auto-lock.
+  const wakeLock = new ScreenWakeLock(navigator, () => document.visibilityState === "visible");
+  syncOnUserActivation(wakeLock, document); // WebKit only grants it inside a gesture
 
-  /** Every input event leaves through here, after the per-host modifier policy. */
-  const send = (ev: InputEvent) => active?.sendInput(remapInput(ev, cmdAsCtrl));
+  /** Every input event leaves through here, after the per-host modifier policy
+   * — unless `native`: the special-keys toolbar's chords already name host
+   * keys (its Win key must stay Win, not become Ctrl). */
+  const send = (ev: InputEvent, native = false) =>
+    active?.sendInput(native ? ev : remapInput(ev, cmdAsCtrl));
 
   const showView = (view: "list" | "session") => {
     listView.hidden = view !== "list";
@@ -329,6 +377,7 @@ function setup(): void {
   const events: ConnectionEvents = {
     onStatus(s, detail, fatal) {
       status = s;
+      statusSince = Date.now();
       dot.className = s;
       // A fatal close (wrong secret, bad target, protocol mismatch) won't fix
       // itself — stop the auto-reconnect loop and leave the reason on screen.
@@ -340,10 +389,13 @@ function setup(): void {
         }
       }
       if (s === "connected") reconnectDelay = RECONNECT_BASE_MS; // reset backoff
+      if (s === "connected") void wakeLock.acquire();
+      else void wakeLock.release(); // a host that's down mustn't keep the screen on
       stats.textContent = detail ?? "";
       // touch-only affordances appear once connected on a touch device
       const showTouchUi = s === "connected" && isTouchDevice();
       kbdBtn.hidden = !showTouchUi;
+      if (!showTouchUi) softKeyboard.close(); // its toggle is gone: don't strand it open
       ptrBtn.hidden = !showTouchUi;
       // Fullscreen API is iPad-only on iOS; installed (standalone) iPhones
       // are already chromeless.
@@ -359,8 +411,11 @@ function setup(): void {
         files?.abortAll();
       }
       if (s === "connected") {
+        // A pairing just succeeded: ask that its token (and our identity)
+        // survive storage eviction. Best effort.
+        if (!pairRow.hidden) void requestPersistentStorage(navigator);
         pairRow.hidden = true;
-        canvas.focus();
+        refocus();
         if (target?.kind === "rtc") {
           saved = remember(
             saved,
@@ -381,6 +436,7 @@ function setup(): void {
           if (wantConnection) startTransport();
         }, wait);
       }
+      sessionBar.sync(); // auto-hide only while connected
     },
     onResolution(r) {
       viewer.setResolution(r);
@@ -409,6 +465,7 @@ function setup(): void {
     onHostInfo(info) {
       hostOs = info.os;
       cmdAsCtrl = cmdActsAsCtrl(info.os, appleClient);
+      toolbar.setHostOs(info.os);
       const os = OS_LABEL[HOST_OS_NAME[info.os] ?? ""];
       titleEl.textContent = os ? `${info.name} · ${os}` : info.name;
       if (target?.kind === "rtc") {
@@ -426,7 +483,7 @@ function setup(): void {
     onAudioTrack(stream) {
       hostAudio.srcObject = stream;
       speakerBtn.hidden = false;
-      reflectSpeaker();
+      playHostAudio();
     },
     onPairingRequired() {
       showPairing("Enter the pairing code shown on the host");
@@ -459,13 +516,13 @@ function setup(): void {
     clipBtn.hidden = !visible;
   });
   clipBtn.addEventListener("click", () => {
-    void hostClipboard.copyNow().then(() => canvas.focus());
+    void hostClipboard.copyNow().then(() => refocus());
   });
 
   const displaySelect = $<HTMLSelectElement>("#display");
   displaySelect.addEventListener("change", () => {
     active?.selectDisplay(Number(displaySelect.value));
-    canvas.focus();
+    refocus();
   });
 
   const pasteFlow = new PasteFlow({
@@ -482,8 +539,10 @@ function setup(): void {
     input?.cancelGesture();
     active?.close();
     files?.abortAll();
+    viewer.resetStream(); // the new connection's video starts at its own keyframe
     hostOs = null;
     cmdAsCtrl = false;
+    toolbar.setHostOs(null);
     let transport: Transport;
     if (target.kind === "lan") {
       const t = new TetherConnection(events, { deviceId, deviceName: settings.name });
@@ -514,7 +573,7 @@ function setup(): void {
   function connectTo(t: Target): void {
     target = t;
     titleEl.textContent = t.kind === "rtc" ? t.name : t.hostPort;
-    transfersEl.innerHTML = "";
+    clearTransfers();
     filesPanel.hidden = true;
     showView("session");
     wantConnection = true;
@@ -536,8 +595,13 @@ function setup(): void {
     dot.className = "closed";
     stats.textContent = "";
     status = "closed";
+    statusSince = Date.now();
+    void wakeLock.release();
+    clearTransfers(); // unreachable from the list: don't keep unsaved Blobs alive
     softKeyboard.blur();
     if (document.fullscreenElement) void document.exitFullscreen();
+    sessionBar.closeSheet();
+    sessionBar.sync();
   }
 
   $("#back").addEventListener("click", () => {
@@ -563,17 +627,23 @@ function setup(): void {
   });
   $("#files-close").addEventListener("click", () => {
     filesPanel.hidden = true;
-    canvas.focus();
+    refocus();
   });
 
-  const transferEls = new Map<number, HTMLLIElement>();
+  const transferRows = new Map<number, { li: HTMLLIElement; t: Transfer }>();
+  // Finished downloads waiting on a "Save…" tap (iOS share sheet, save.ts).
+  // Dropped once shared, when their row is dismissed, or with the list.
+  const unsaved = new Map<number, { file: File; note?: string }>();
   function renderTransfer(t: Transfer): void {
-    let li = transferEls.get(t.id);
-    if (!li) {
-      li = document.createElement("li");
-      transferEls.set(t.id, li);
-      transfersEl.prepend(li);
+    let row = transferRows.get(t.id);
+    if (!row) {
+      row = { li: document.createElement("li"), t };
+      transferRows.set(t.id, row);
+      transfersEl.prepend(row.li);
     }
+    row.t = t;
+    const li = row.li;
+    const held = t.state === "complete" ? unsaved.get(t.id) : undefined;
     const pct = t.size > 0 ? Math.min(100, Math.round((t.done / t.size) * 100)) : 0;
     const arrow = t.direction === "upload" ? "↑" : "↓";
     const detail =
@@ -581,22 +651,49 @@ function setup(): void {
         ? esc(t.error ?? "failed")
         : t.state === "cancelled"
           ? "cancelled"
-          : t.state === "complete"
-            ? `done · ${formatBytes(t.size)}`
-            : t.state === "waiting"
-              ? "waiting for host…"
-              : `${formatBytes(t.done)} of ${formatBytes(t.size)}`;
+          : held
+            ? (held.note ?? `ready · ${formatBytes(t.size)}`)
+            : t.state === "complete"
+              ? `done · ${formatBytes(t.size)}`
+              : t.state === "waiting"
+                ? "waiting for host…"
+                : `${formatBytes(t.done)} of ${formatBytes(t.size)}`;
     li.className = `transfer ${t.state}`;
     li.innerHTML = `
       <div class="t-head"><span>${arrow} ${esc(t.name)}</span>
         ${t.state === "active" || t.state === "waiting" ? `<button class="icon small" data-cancel="${t.id}" aria-label="Cancel">✕</button>` : ""}
+        ${held ? `<button class="icon small" data-dismiss="${t.id}" aria-label="Discard">✕</button>` : ""}
       </div>
       <progress max="100" value="${t.state === "complete" ? 100 : pct}"></progress>
-      <div class="muted small">${detail}</div>`;
+      <div class="muted small">${detail}</div>
+      ${held ? `<button class="primary save" data-save="${t.id}">Save…</button>` : ""}`;
   }
+  function clearTransfers(): void {
+    transfersEl.innerHTML = "";
+    transferRows.clear();
+    unsaved.clear();
+  }
+  const saveHeld = (id: number) => {
+    const held = unsaved.get(id);
+    if (!held) return;
+    // Straight from the tap: share() needs this gesture.
+    void shareFile(navigator, held.file).then((outcome) => {
+      if (outcome === "shared") unsaved.delete(id);
+      held.note = outcome === "failed" ? "couldn't open the share sheet — try again" : undefined;
+      const row = transferRows.get(id);
+      if (row) renderTransfer(row.t);
+    });
+  };
   transfersEl.addEventListener("click", (e) => {
-    const id = (e.target as HTMLElement).dataset.cancel;
-    if (id) files?.cancel(Number(id));
+    const { cancel, save, dismiss } = (e.target as HTMLElement).dataset;
+    if (cancel) files?.cancel(Number(cancel));
+    if (save) saveHeld(Number(save));
+    if (dismiss) {
+      const id = Number(dismiss);
+      unsaved.delete(id);
+      transferRows.get(id)?.li.remove();
+      transferRows.delete(id);
+    }
   });
 
   const uploadFiles = (list: FileList | File[]) => {
@@ -619,7 +716,13 @@ function setup(): void {
     uploadFiles(e.dataTransfer.files);
   });
 
-  function saveBlob(name: string, blob: Blob): void {
+  function saveBlob(name: string, blob: Blob, id: number): void {
+    const file = fileFor(name, blob);
+    if (chooseSaveStrategy({ ios, nav: navigator }, file) === "share") {
+      unsaved.set(id, { file }); // its row renders the Save… button
+      filesPanel.hidden = false; // that tap is the user's next step
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -666,11 +769,23 @@ function setup(): void {
     speakerBtn.title = hostAudio.muted ? "Host audio (muted)" : "Host audio (playing)";
     speakerBtn.classList.toggle("on", !hostAudio.muted);
   };
+  // Each (re)connect attaches a fresh stream that needs play() again. Muted
+  // playback is always allowed; unmuted can be refused without a fresh gesture
+  // (iOS, after a reconnect or a resume) — then drop back to muted, so the 🔇
+  // button is the tap that starts it.
+  const playHostAudio = () => {
+    reflectSpeaker();
+    hostAudio.play().catch((e: unknown) => {
+      if ((e as { name?: string } | null)?.name !== "NotAllowedError" || hostAudio.muted) return;
+      hostAudio.muted = true;
+      reflectSpeaker();
+    });
+  };
   speakerBtn.addEventListener("click", () => {
     hostAudio.muted = !hostAudio.muted;
     if (!hostAudio.muted) void hostAudio.play().catch(() => {});
     reflectSpeaker();
-    canvas.focus();
+    refocus();
   });
 
   // ---- touch UI: keyboard, pointer-mode toggle, fullscreen ------------------
@@ -678,17 +793,81 @@ function setup(): void {
   const ptrBtn = $<HTMLButtonElement>("#ptr");
   const fullBtn = $<HTMLButtonElement>("#full");
 
+  // Everything the soft keyboard sends goes through the toolbar's sticky
+  // modifiers; its chords press modifier keys explicitly (the Windows injector
+  // ignores the mask) and name host keys, so they're sent `native`.
+  const extraKeys = new ExtraKeys({
+    key: (ev) => send(ev, true),
+    text: (text) => active?.sendText(text),
+    changed: () => toolbar.render(),
+  });
   const softKeyboard = new SoftKeyboard({
-    sendText: (text) => active?.sendText(text),
-    sendKeyTap: (code) => {
-      send({ type: "input", kind: "keydown", code, modifiers: 0 });
-      send({ type: "input", kind: "keyup", code, modifiers: 0 });
+    sendText: (text) => extraKeys.type(text),
+    // Field keys carry the client's modifiers (an iPad keyboard's ⌘): apply
+    // the host policy first, then chord with any toolbar latches.
+    sendKeyTap: (code, modifiers) => {
+      const ev = remapInput({ type: "input", kind: "keydown", code, modifiers }, cmdAsCtrl);
+      if (ev.kind === "keydown") extraKeys.tap(ev.code, ev.modifiers);
+    },
+    modifiersLatched: () => extraKeys.latched,
+  });
+  // The field can lose focus on its own (iOS "Done", a tap elsewhere), so the
+  // button mirrors the keyboard's state rather than its own clicks.
+  softKeyboard.onChange((open) => kbdBtn.classList.toggle("on", open));
+  kbdBtn.addEventListener("mousedown", (e) => e.preventDefault()); // don't blur the field first
+  kbdBtn.addEventListener("click", () => {
+    softKeyboard.toggle(); // synchronous: inside the click gesture
+  });
+  /** Hand keystroke focus back after a control is used: the soft keyboard's
+   * field while it's open (focusing the canvas would dismiss it), else the canvas. */
+  const refocus = () => {
+    if (softKeyboard.isOpen) softKeyboard.open();
+    else canvas.focus();
+  };
+
+  // ---- special keys + phone paste ---------------------------------------------
+  // Shown while the soft keyboard's field has focus — the on-screen keyboard,
+  // or an iPad hardware keyboard after ⌨. Latches don't outlive it.
+  const toolbar = new KeyToolbar($("#xkeys"), extraKeys.sticky, {
+    key: (code) => softKeyboard.sendKey(code), // moves the host caret: drops the context
+    modifier: (mod) => {
+      extraKeys.sticky.tap(mod, performance.now());
+      softKeyboard.resetContext(); // the next keystroke is a chord, never an autocorrect edit
+      toolbar.render();
+    },
+    paste: () => pasteFromDevice(),
+  });
+  softKeyboard.onChange((open) => {
+    toolbar.visible = open;
+    if (!open) extraKeys.clear();
+  });
+
+  // A button paste holds no physical modifier, so its V tap is a full chord;
+  // through send(), Cmd+V becomes Ctrl+V on Windows hosts as from a keyboard.
+  const buttonPaste = new PasteFlow({
+    sendClipboard: (text) => active?.sendClipboard(text),
+    sendKeyTap: (code, modifiers) => {
+      for (const ev of chord(modifiers, code)) send(ev);
     },
   });
-  kbdBtn.addEventListener("click", () => {
-    const open = softKeyboard.toggle(); // synchronous: inside the click gesture
-    kbdBtn.classList.toggle("on", open);
+  const pasteText = (text: string) => {
+    // The host caret moves past the paste: an autocorrect of the word typed
+    // before it would otherwise Backspace into the pasted text.
+    softKeyboard.resetContext();
+    buttonPaste.pasteText(text, pasteModifiers(hostOs, cmdAsCtrl));
+  };
+  const pasteSheet = new PasteSheet(pasteText, () => {
+    if (status === "connected") softKeyboard.open(); // still inside the tap
   });
+  const pasteFromDevice = () => {
+    const read = readLocalClipboard(); // synchronous: iOS asks to confirm now
+    if (!read) {
+      pasteSheet.open(); // no Clipboard API (plain-HTTP page)
+      return;
+    }
+    // Refused (NotAllowedError) or failed: quietly offer the paste box instead.
+    void read.then((text) => (text === null ? pasteSheet.open() : pasteText(text)));
+  };
 
   // input events route to whatever transport is currently active. Phones
   // default to trackpad (relative cursor); tablets to absolute touch.
@@ -698,7 +877,18 @@ function setup(): void {
     canvas,
     viewer,
     { sendInput: send },
-    { pasteFlow, zoomSink: viewer, touchMode: pointerMode },
+    {
+      pasteFlow,
+      zoomSink: viewer,
+      touchMode: pointerMode,
+      // A tap keeps the open keyboard's focus, but may move the host caret,
+      // so the autocorrect context is stale.
+      shouldFocusCanvas: () => {
+        if (!softKeyboard.isOpen) return true;
+        softKeyboard.resetContext();
+        return false;
+      },
+    },
   );
   const reflectPtr = () => {
     ptrBtn.textContent = pointerMode === "trackpad" ? "🖱" : "👆";
@@ -710,8 +900,26 @@ function setup(): void {
     store.set("tether-ptr-mode", pointerMode);
     input.setMode(pointerMode);
     reflectPtr();
-    canvas.focus();
+    refocus();
   });
+
+  // ---- zoom reset chip + layout changes ---------------------------------------
+  // The chip shows only while pinch-zoomed. It must not take focus (that
+  // would steal it from the canvas or close the soft keyboard).
+  const zoomReset = $<HTMLButtonElement>("#zoom-reset");
+  viewer.onZoomedChange = (zoomed) => {
+    zoomReset.hidden = !zoomed;
+  };
+  zoomReset.addEventListener("mousedown", (e) => e.preventDefault());
+  zoomReset.addEventListener("click", () => {
+    viewer.resetZoom();
+    relayoutSession();
+  });
+  setRelayoutHandler(() => {
+    viewer.relayout();
+    input.relayout();
+  });
+  watchLayout(stage);
 
   fullBtn.addEventListener("click", () => {
     if (document.fullscreenElement) {
@@ -719,7 +927,63 @@ function setup(): void {
     } else {
       void sessionView.requestFullscreen().catch(() => {});
     }
-    canvas.focus();
+    refocus();
+  });
+
+  // ---- session bar: compact sheet + auto-hide (sessionbar.ts) -----------------
+  const sessionBar = setupSessionBar({
+    view: sessionView,
+    connected: () => status === "connected",
+    holds: [pairRow, filesPanel, settingsDlg],
+    refocus,
+    store,
+  });
+  $("#bar-settings").addEventListener("click", openSettings);
+
+  // ---- app lifecycle: backgrounded, locked, back again (lifecycle.ts) -------
+  const reconnectNow = () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    reconnectDelay = RECONNECT_BASE_MS;
+    startTransport();
+  };
+  const resumeProbe = new ResumeProbe();
+  watchLifecycle(document, window, {
+    onHidden() {
+      // a finger mid-drag never lifts in a frozen page: release it now
+      input.cancelGesture();
+      resumeProbe.cancel(); // judged afresh on the next resume
+    },
+    onResume(_reason, frozenMs) {
+      void wakeLock.sync(); // the system dropped it while hidden
+      resumeProbe.cancel();
+      const transport = active;
+      const action = resumeAction({
+        wantConnection,
+        status,
+        transportAlive: transport?.connected ?? false,
+        statusAgeMs: Date.now() - statusSince,
+        frozenMs,
+        rxAgeMs: transport ? Date.now() - transport.lastRxAt : Infinity,
+      });
+      if (action === "reconnect") {
+        reconnectNow();
+        return;
+      }
+      if (hostAudio.srcObject && hostAudio.paused) playHostAudio(); // iOS may pause it
+      if (action === "verify" && transport) {
+        // Quiet since before the gap: give the host a moment to show it's
+        // still there before tearing the session (and its transfers) down.
+        resumeProbe.start(
+          () => transport.lastRxAt,
+          () => {
+            if (active === transport && wantConnection && status === "connected") reconnectNow();
+          },
+        );
+      }
+    },
   });
 
   setInterval(() => {
@@ -737,6 +1001,7 @@ function setup(): void {
   }, 30_000);
 
   // ---- start ----------------------------------------------------------------
+  trackVisualViewport(); // keyboard-aware layout: CSS vars on :root
   startDirectory();
   // Deep links (kept from the single-bar UI): ?host=ip:port connects over LAN,
   // ?mode=rtc&target=<device id> straight to a machine.

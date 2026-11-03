@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { modifierMask, normalizedFromClient, wheelToPixels } from "./input";
-import { MOD_CTRL, MOD_META, MOD_SHIFT } from "./protocol";
+import { attachInput, modifierMask, normalizedFromClient, wheelToPixels } from "./input";
+import { MOD_CAPS_LOCK, MOD_CAPS_LOCK_KNOWN, MOD_CTRL, MOD_META, MOD_SHIFT } from "./protocol";
+import type { Viewer } from "./viewer";
 
 describe("normalizedFromClient", () => {
   // Viewer letterboxed: 16:10 content displayed at 800x500 offset (100, 50).
@@ -43,6 +44,17 @@ describe("modifierMask", () => {
       modifierMask({ shiftKey: false, ctrlKey: false, altKey: false, metaKey: false }),
     ).toBe(0);
   });
+
+  it("reports the Caps Lock state when the event can say it", () => {
+    const none = { shiftKey: false, ctrlKey: false, altKey: false, metaKey: false };
+    const capsOn = { ...none, getModifierState: (k: string) => k === "CapsLock" };
+    const capsOff = { ...none, getModifierState: () => false };
+    expect(modifierMask(capsOn)).toBe(MOD_CAPS_LOCK_KNOWN | MOD_CAPS_LOCK);
+    expect(modifierMask(capsOff)).toBe(MOD_CAPS_LOCK_KNOWN);
+    expect(modifierMask({ ...capsOn, shiftKey: true })).toBe(
+      MOD_SHIFT | MOD_CAPS_LOCK_KNOWN | MOD_CAPS_LOCK,
+    );
+  });
 });
 
 describe("wheelToPixels", () => {
@@ -56,5 +68,26 @@ describe("wheelToPixels", () => {
   it("clamps to i16", () => {
     expect(wheelToPixels(99999, 0)).toBe(32767);
     expect(wheelToPixels(-99999, 0)).toBe(-32768);
+  });
+});
+
+describe("attachInput (touch)", () => {
+  // iOS WebKit turns an uncancelled tap into mouse events whose mousedown
+  // focuses the canvas — blurring the soft keyboard's field, which dismisses
+  // the keyboard on every tap on the remote screen (seen in the Simulator).
+  it("cancels touchend so no focus-stealing mouse tap is synthesized", () => {
+    const canvas = new EventTarget() as unknown as HTMLCanvasElement;
+    const rect = { left: 0, top: 0, width: 100, height: 100 };
+    const viewer = {
+      displayedRect: () => rect,
+      visibleRect: () => rect,
+      setCursor: () => {},
+      hideCursor: () => {},
+      cursorVisible: false,
+    } as unknown as Viewer;
+    attachInput(canvas, viewer, { sendInput: () => {} });
+    const ev = new Event("touchend", { cancelable: true });
+    canvas.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
   });
 });

@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HostClipboard, PASTE_FALLBACK_MS, PasteFlow } from "./clipboard";
+import {
+  HostClipboard,
+  LARGE_PASTE_BYTES,
+  LARGE_PASTE_DELAY_MS,
+  PASTE_FALLBACK_MS,
+  PasteFlow,
+  pasteModifiers,
+  readLocalClipboard,
+} from "./clipboard";
+import { HostOs, MOD_CTRL, MOD_META } from "./protocol";
 
 function makeFlow() {
   const calls: string[] = [];
@@ -60,6 +69,123 @@ describe("PasteFlow", () => {
     flow.onPasteEvent("x");
     expect(flow.onPasteKeyUp()).toBe(true);
     expect(flow.onPasteKeyUp()).toBe(false); // an unrelated later keyup passes
+  });
+
+  it("large hardware pastes give the clipboard a head start", () => {
+    const { flow, calls } = makeFlow();
+    const big = "x".repeat(LARGE_PASTE_BYTES);
+    flow.onPasteCombo(8);
+    flow.onPasteEvent(big);
+    expect(calls).toEqual([`clip:${big}`]);
+    vi.advanceTimersByTime(LARGE_PASTE_DELAY_MS);
+    expect(calls).toEqual([`clip:${big}`, "tap:KeyV:8"]);
+  });
+});
+
+describe("PasteFlow.pasteText (Paste button)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("syncs the clipboard, then taps V with the given modifiers", () => {
+    const { flow, calls } = makeFlow();
+    flow.pasteText("from phone", MOD_META);
+    expect(calls).toEqual(["clip:from phone", `tap:KeyV:${MOD_META}`]);
+    vi.runAllTimers();
+    expect(calls).toHaveLength(2); // no fallback timer involved
+  });
+
+  it("large text: the V tap waits like a hardware paste", () => {
+    const { flow, calls } = makeFlow();
+    const big = "y".repeat(LARGE_PASTE_BYTES + 1);
+    flow.pasteText(big, MOD_CTRL);
+    expect(calls).toEqual([`clip:${big}`]);
+    vi.advanceTimersByTime(LARGE_PASTE_DELAY_MS - 1);
+    expect(calls).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(calls).toEqual([`clip:${big}`, `tap:KeyV:${MOD_CTRL}`]);
+  });
+
+  it("empty text sends only the keystroke, as a hardware paste would", () => {
+    const { flow, calls } = makeFlow();
+    flow.pasteText("", MOD_META);
+    expect(calls).toEqual([`tap:KeyV:${MOD_META}`]);
+  });
+
+  it("has no keyup to swallow and leaves an armed combo alone", () => {
+    const { flow, calls } = makeFlow();
+    flow.pasteText("a", MOD_META);
+    expect(flow.onPasteKeyUp()).toBe(false); // a later real KeyV keyup still passes
+    flow.onPasteCombo(MOD_META);
+    flow.pasteText("b", MOD_META);
+    expect(flow.onPasteEvent("c")).toBe(true); // the combo is still armed
+    expect(calls).toEqual([
+      "clip:a",
+      `tap:KeyV:${MOD_META}`,
+      "clip:b",
+      `tap:KeyV:${MOD_META}`,
+      "clip:c",
+      `tap:KeyV:${MOD_META}`,
+    ]);
+  });
+});
+
+describe("pasteModifiers", () => {
+  it("Cmd for Macs (and pre-HostInfo hosts), and when the remap makes it Ctrl", () => {
+    expect(pasteModifiers(HostOs.MacOs, false)).toBe(MOD_META);
+    expect(pasteModifiers(null, false)).toBe(MOD_META);
+    expect(pasteModifiers(HostOs.Unknown, false)).toBe(MOD_META);
+    expect(pasteModifiers(HostOs.Windows, true)).toBe(MOD_META); // Apple client: remapped
+  });
+
+  it("Ctrl where no remap applies and the host pastes with Ctrl", () => {
+    expect(pasteModifiers(HostOs.Windows, false)).toBe(MOD_CTRL);
+    expect(pasteModifiers(HostOs.Linux, false)).toBe(MOD_CTRL);
+  });
+});
+
+describe("readLocalClipboard", () => {
+  it("null at once without the async Clipboard API", () => {
+    expect(readLocalClipboard({})).toBeNull();
+    expect(readLocalClipboard(undefined)).toBeNull();
+    expect(readLocalClipboard({ clipboard: {} })).toBeNull();
+  });
+
+  it("resolves the clipboard text", async () => {
+    await expect(readLocalClipboard({ clipboard: { readText: async () => "hi" } })).resolves.toBe("hi");
+  });
+
+  it("a refused read (NotAllowedError) resolves null instead of rejecting", async () => {
+    const refused = Object.assign(new Error("denied"), { name: "NotAllowedError" });
+    const read = readLocalClipboard({
+      clipboard: {
+        readText: () => Promise.reject(refused),
+      },
+    });
+    await expect(read).resolves.toBeNull();
+  });
+
+  it("a throwing implementation resolves null too", async () => {
+    const read = readLocalClipboard({
+      clipboard: {
+        readText: () => {
+          throw new Error("boom");
+        },
+      },
+    });
+    await expect(read).resolves.toBeNull();
+  });
+
+  it("calls readText synchronously, inside the gesture", () => {
+    let called = false;
+    readLocalClipboard({
+      clipboard: {
+        readText: () => {
+          called = true;
+          return Promise.resolve("");
+        },
+      },
+    });
+    expect(called).toBe(true);
   });
 });
 

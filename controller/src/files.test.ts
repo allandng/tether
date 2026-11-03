@@ -5,11 +5,11 @@ import { FILE_CHUNK_LEN, type FileMessage, FileStatus } from "./protocol";
 function harness(maxMemoryDownload = 1 << 20) {
   const sent: FileMessage[] = [];
   const states = new Map<number, Transfer>();
-  const saved: { name: string; blob: Blob }[] = [];
+  const saved: { name: string; blob: Blob; id: number }[] = [];
   const sink: FileSink = { send: (m) => sent.push(m), drain: () => Promise.resolve() };
   const ft = new FileTransfers(sink, (t) => states.set(t.id, t), {
     maxMemoryDownload,
-    save: (name, blob) => saved.push({ name, blob }),
+    save: (name, blob, id) => saved.push({ name, blob, id }),
   });
   return { ft, sent, states, saved };
 }
@@ -71,6 +71,7 @@ describe("downloads", () => {
     ft.onMessage({ type: "file_end", transferId: t.id, status: FileStatus.Complete });
     expect(states.get(t.id)?.state).toBe("complete");
     expect(saved[0]?.name).toBe("notes.txt");
+    expect(saved[0]?.id).toBe(t.id); // names the row that may hold it for "Save…"
     expect(await saved[0]?.blob.text()).toBe("hi!!!");
   });
 
