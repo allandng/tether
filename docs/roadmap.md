@@ -29,7 +29,8 @@ blocking. Phases 10 and 11 are features you can ship without.
 [9](phase9-gate-results.md), [10](phase10-gate-results.md),
 [11](phase11-gate-results.md)). What remains is verification that needs
 hardware or money rather than code: phone/iPad and installed-PWA passes, a live
-WAN + TURN run, a Mac run of the new code, the macOS system-audio capturer,
+WAN + TURN run, a run of the new code on a real Mac (it builds clean in macOS
+CI), the macOS system-audio capturer,
 and Apple/Windows code-signing identities.
 
 ## What already exists that these phases build on

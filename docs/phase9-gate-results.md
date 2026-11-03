@@ -45,7 +45,7 @@ Built per [phase9-plan.md](phase9-plan.md).
 |---|---|---|
 | 1 | Clean-machine install starts at login (`.pkg` and Windows installer) | ⏳ Windows installer dry-run (`-WhatIf`) walks every step; the agent was run directly and verified (hidden window, restart after kill, log). Not registered on this machine without the owner's go-ahead. `.pkg` unbuilt here (needs a Mac). |
 | 2 | Neither installer trips Gatekeeper / SmartScreen | ❌ Needs paid signing identities (Apple Developer ID, Windows OV/EV cert). The scripts sign when they're provided. |
-| 3 | First run walks through both macOS grants, detected without restart | ⏳ Implemented; needs a Mac. Screen Recording still needs a restart (macOS applies it at launch) — logged as such. |
+| 3 | First run walks through both macOS grants, detected without restart | ⏳ Implemented and builds clean in macOS CI; needs a real Mac to exercise. Screen Recording still needs a restart (macOS applies it at launch) — logged as such. |
 | 4 | `tetherd pair` arms and prints a code against a background daemon | ✅ Daemon started from the config file only; `tetherd pair` printed a code via the pipe, the daemon logged "pairing armed via the control channel". |
 | 5 | No secret in the process command line; config 0600 | ✅ Windows: process command line shows only `--config …`; config written via `atomic_write`, lives under the owner-only `%APPDATA%`. Pipe ACL verified: SYSTEM + the user, inheritance off. Unix 0600 enforced in code. |
 | 6 | Reboot brings the host back, a phone reconnects with no step | ⏳ Follows from the logon task + saved token; not rebooted here. |

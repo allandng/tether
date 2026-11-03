@@ -36,7 +36,8 @@ Phases 1–5b built the engine; phases 6–11 closed the gap to what Chrome
 Remote Desktop did — reachable from anywhere, a Windows host, a machine list,
 installers, audio and file transfer — per the [roadmap](docs/roadmap.md),
 which also covers the locked-screen constraint (keep hosts awake and signed
-in). Still open: real-device phone/iPad passes, a live WAN/TURN run, the macOS
+in). CI builds and tests on both macOS and Windows. Still open: real-device
+phone/iPad passes, a live WAN/TURN run, a hands-on run on a real Mac, the macOS
 audio capturer, and signing certificates for the installers.
 
 ## Layout
