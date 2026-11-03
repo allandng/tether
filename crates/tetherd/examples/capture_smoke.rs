@@ -11,7 +11,10 @@ fn main() -> anyhow::Result<()> {
     use tetherd::capture::{FrameEncoder, ScreenCapturer};
 
     #[cfg(target_os = "macos")]
-    let mut capturer = tetherd::capture::macos::SckCapturer::main_display(30)?;
+    let mut capturer = tetherd::capture::macos::SckCapturer::main_display(
+        30,
+        tetherd::capture::macos::CaptureFormat::Bgra,
+    )?;
     #[cfg(windows)]
     let mut capturer = {
         tetherd::win::init_dpi_awareness();

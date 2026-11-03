@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use tether_protocol::{
     FILE_CHUNK_LEN, FileAccept, FileChunk, FileEnd, FileOffer, FileRequest, FileStatus,
     MAX_FILE_NAME_LEN, Message,
@@ -60,6 +61,101 @@ impl FileConfig {
         home.map(|h| PathBuf::from(h).join("Downloads"))
             .unwrap_or_else(std::env::temp_dir)
     }
+}
+
+// ---- upload-folder access --------------------------------------------------
+
+/// Can tetherd use the upload folder? Reported by `tetherd status`.
+///
+/// On macOS, `~/Downloads` is privacy-protected: a LaunchAgent's first access
+/// raises a separate "access files in your Downloads folder" prompt, and if
+/// that is denied (or nobody was there to answer) every upload fails with
+/// EPERM. The startup check logs how to fix it; `tetherd status` shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirAccess {
+    /// Listable and writable.
+    Ok,
+    /// Does not exist yet; the first upload creates it.
+    Missing,
+    /// The OS refused (EPERM/EACCES): on macOS, the folder's privacy prompt
+    /// was denied or never answered.
+    Denied,
+    /// Not a directory, a read-only volume, an I/O error, …
+    Error,
+    /// The check did not finish in time (it may be waiting on a prompt).
+    TimedOut,
+    /// A state this build does not know (sent by a newer daemon).
+    #[serde(other)]
+    Unknown,
+}
+
+impl DirAccess {
+    /// Classify the outcome of [`probe_dir`].
+    pub fn from_probe(probe: &std::io::Result<bool>) -> Self {
+        match probe {
+            Ok(true) => DirAccess::Ok,
+            Ok(false) => DirAccess::Missing,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => DirAccess::Denied,
+            Err(_) => DirAccess::Error,
+        }
+    }
+
+    /// What to tell the operator (empty when all is well).
+    pub fn advice(self) -> &'static str {
+        match self {
+            DirAccess::Ok | DirAccess::Missing => "",
+            DirAccess::Denied if cfg!(target_os = "macos") => {
+                "uploads will fail: allow tetherd in System Settings → Privacy & Security → \
+                 Files & Folders (Downloads Folder), or set upload_dir in config.toml to a \
+                 folder outside Desktop/Documents/Downloads"
+            }
+            DirAccess::Denied => "uploads will fail: no permission to write to the upload folder",
+            DirAccess::Error => "uploads will fail: the upload folder is not usable",
+            DirAccess::TimedOut => {
+                "the access check did not finish (a macOS privacy prompt may be waiting)"
+            }
+            DirAccess::Unknown => "",
+        }
+    }
+}
+
+/// Probe `dir` the way an upload uses it: list it, then create and remove a
+/// hidden file. `Ok(false)` if it does not exist yet. On macOS the first call
+/// for a protected folder can raise (and wait on) a privacy prompt, so keep
+/// it off latency-sensitive threads.
+pub fn probe_dir(dir: &Path) -> std::io::Result<bool> {
+    match std::fs::metadata(dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(std::io::Error::other("not a directory")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    std::fs::read_dir(dir)?;
+    static PROBES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let probe = dir.join(format!(
+        ".tether-{}-{}.probe",
+        std::process::id(),
+        PROBES.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(true)
+}
+
+/// Startup check of the upload folder: log anything that will make uploads
+/// fail, with what to do about it.
+pub fn check_upload_dir(dir: &Path) -> DirAccess {
+    let probe = probe_dir(dir);
+    let access = DirAccess::from_probe(&probe);
+    match &probe {
+        Ok(_) => info!(dir = %dir.display(), ?access, "upload folder"),
+        Err(e) => warn!(dir = %dir.display(), error = %e, "{}", access.advice()),
+    }
+    access
 }
 
 /// Outbound message queues a session drains (see the module docs).
@@ -917,5 +1013,63 @@ mod tests {
         .await;
         assert_eq!(out.control.recv().await, Some(end(10, FileStatus::Error)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upload_dir_access_is_probed_and_classified() {
+        let dir = tmpdir("access");
+        assert_eq!(check_upload_dir(&dir), DirAccess::Ok);
+        assert_eq!(files_in(&dir), Vec::<String>::new(), "probe file removed");
+        assert_eq!(
+            check_upload_dir(&dir.join("not-yet")),
+            DirAccess::Missing,
+            "uploads create a missing folder"
+        );
+        let file = dir.join("plain");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(check_upload_dir(&file), DirAccess::Error);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro = dir.join("read-only");
+            std::fs::create_dir(&ro).unwrap();
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+            // root ignores mode bits; only meaningful for a normal user.
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            if unsafe { libc::geteuid() } != 0 {
+                assert_eq!(check_upload_dir(&ro), DirAccess::Denied);
+            }
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(DirAccess::from_probe(&Err(denied)), DirAccess::Denied);
+        // What macOS TCC returns for a denied Downloads folder (raw 1 is
+        // EPERM only on Unix; on Windows it is ERROR_INVALID_FUNCTION).
+        #[cfg(unix)]
+        {
+            let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+            assert_eq!(DirAccess::from_probe(&Err(eperm)), DirAccess::Denied);
+        }
+        assert!(!DirAccess::Denied.advice().is_empty());
+        assert!(DirAccess::Ok.advice().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_access_has_a_stable_json_shape() {
+        assert_eq!(serde_json::to_string(&DirAccess::Ok).unwrap(), r#""ok""#);
+        assert_eq!(
+            serde_json::to_string(&DirAccess::TimedOut).unwrap(),
+            r#""timed_out""#
+        );
+        assert_eq!(
+            serde_json::from_str::<DirAccess>(r#""denied""#).unwrap(),
+            DirAccess::Denied
+        );
+        assert_eq!(
+            serde_json::from_str::<DirAccess>(r#""some_future_state""#).unwrap(),
+            DirAccess::Unknown,
+            "an older CLI must not choke on a newer daemon"
+        );
     }
 }

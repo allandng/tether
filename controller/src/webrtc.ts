@@ -39,6 +39,7 @@ export class WebRtcTransport implements Transport {
   private session: ProtocolSession | null = null;
   private readonly reassembler = new FrameReassembler();
   private readonly bulkReassembler = new FrameReassembler();
+  lastRxAt = 0;
 
   constructor(private readonly events: ConnectionEvents) {}
 
@@ -111,6 +112,7 @@ export class WebRtcTransport implements Transport {
     this.ctl = ctl;
     ctl.onopen = () => session.start();
     ctl.onmessage = (e) => {
+      this.lastRxAt = Date.now();
       if (e.data instanceof ArrayBuffer) session.onMessage(e.data);
     };
     ctl.onclose = () => this.fail("control channel closed");
@@ -122,6 +124,7 @@ export class WebRtcTransport implements Transport {
     const media = pc.createDataChannel("tether-media", { ordered: true });
     media.binaryType = "arraybuffer";
     media.onmessage = (e) => {
+      this.lastRxAt = Date.now();
       if (!(e.data instanceof ArrayBuffer)) return;
       const wire = this.reassembler.onChunk(e.data);
       if (wire) session.onMessage(wire);
@@ -132,6 +135,7 @@ export class WebRtcTransport implements Transport {
     bulk.bufferedAmountLowThreshold = FILE_HIGH_WATER / 4;
     this.bulk = bulk;
     bulk.onmessage = (e) => {
+      this.lastRxAt = Date.now();
       if (!(e.data instanceof ArrayBuffer)) return;
       const wire = this.bulkReassembler.onChunk(e.data);
       if (wire) session.onMessage(wire);

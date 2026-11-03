@@ -72,7 +72,8 @@ pub struct Args {
     pub max_controllers: u32,
 
     /// Arm a one-time pairing code at startup (printed to the terminal) so a
-    /// new controller can pair. Valid 5 minutes.
+    /// new controller can pair. Valid 5 minutes; meanwhile every controller
+    /// without a token is asked for it.
     #[arg(long)]
     pub pair: bool,
 

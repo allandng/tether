@@ -9,7 +9,9 @@
 //! changes. The session layer, though, relies on a steady trickle — a newly
 //! connected controller needs a frame (and an H.264 decoder needs a
 //! keyframe) even if the screen is static — so while idle the last image is
-//! re-emitted every [`IDLE_REPEAT`]. Static repeats are cheap for H.264.
+//! re-emitted every [`IDLE_REPEAT`], sharing its pixels with the frame it
+//! repeats (so the pipeline can tell a repeat from a new image). Static
+//! repeats are cheap for H.264.
 //!
 //! Mode changes (resolution, monitor hot-plug), the secure desktop (UAC, the
 //! lock screen) and fullscreen-exclusive apps all surface as
@@ -93,6 +95,9 @@ pub struct DxgiCapturer {
     dup: Option<Duplication>,
     desktop: Option<Desktop>,
     pointer: Pointer,
+    /// The last frame composed from `desktop` and `pointer`; an idle repeat
+    /// re-emits it (sharing its pixels) until either changes.
+    composed: Option<RawFrame>,
     last_emit: Option<Instant>,
     /// When the next frame is due, on a fixed 1/fps schedule — so time the
     /// caller spends encoding counts toward the interval instead of adding to it.
@@ -123,42 +128,58 @@ impl DxgiCapturer {
             dup: Some(dup),
             desktop: None,
             pointer: Pointer::default(),
+            composed: None,
             last_emit: None,
             next_due: None,
             lost_since: None,
         })
     }
 
-    /// The last desktop image with the cursor drawn on, as a frame.
-    fn compose(&mut self) -> Option<RawFrame> {
-        let desktop = self.desktop.as_ref()?;
-        let mut bgra = desktop.bgra.clone();
-        if self.pointer.visible
-            && let Some(shape) = &self.pointer.shape
-        {
-            cursor::draw(
-                &mut bgra,
-                desktop.width,
-                desktop.height,
-                desktop.width as usize * 4,
-                shape,
-                self.pointer.x,
-                self.pointer.y,
-            );
-        }
+    /// The last desktop image with the cursor drawn on, as a frame. It is
+    /// composed afresh only when `changed` (a new desktop image or pointer
+    /// update since the last composition); otherwise — an idle repeat — the
+    /// last composition is re-emitted with a fresh timestamp, sharing its
+    /// pixels, which is how the pipeline recognises a repeat.
+    fn compose(&mut self, changed: bool) -> Option<RawFrame> {
+        let frame = match &self.composed {
+            Some(last) if !changed => RawFrame {
+                timestamp_micros: unix_micros(),
+                ..last.clone()
+            },
+            _ => {
+                let desktop = self.desktop.as_ref()?;
+                let mut bgra = desktop.bgra.clone();
+                if self.pointer.visible
+                    && let Some(shape) = &self.pointer.shape
+                {
+                    cursor::draw(
+                        &mut bgra,
+                        desktop.width,
+                        desktop.height,
+                        desktop.width as usize * 4,
+                        shape,
+                        self.pointer.x,
+                        self.pointer.y,
+                    );
+                }
+                let frame = RawFrame::from_bgra(
+                    desktop.width,
+                    desktop.height,
+                    desktop.width as usize * 4,
+                    bgra,
+                    unix_micros(),
+                );
+                self.composed = Some(frame.clone()); // shares the pixels
+                frame
+            }
+        };
         let now = Instant::now();
         self.last_emit = Some(now);
         let next = self.next_due.unwrap_or(now) + self.frame_interval;
         // Running behind (slow encode, or idle): restart the schedule from now
         // rather than bursting to catch up.
         self.next_due = Some(if next < now { now } else { next });
-        Some(RawFrame {
-            width: desktop.width,
-            height: desktop.height,
-            bytes_per_row: desktop.width as usize * 4,
-            bgra,
-            timestamp_micros: unix_micros(),
-        })
+        Some(frame)
     }
 
     /// One `AcquireNextFrame` round. `Ok(true)` = the image or the cursor
@@ -288,7 +309,7 @@ impl ScreenCapturer for DxgiCapturer {
                 .max(Duration::from_millis(1));
             match self.acquire(wait) {
                 Ok(true) if self.desktop.is_some() => {
-                    if let Some(frame) = self.compose() {
+                    if let Some(frame) = self.compose(true) {
                         return Ok(frame);
                     }
                 }
@@ -354,17 +375,22 @@ impl ScreenCapturer for DxgiCapturer {
             height: dup.height,
             bgra: vec![0; dup.width as usize * dup.height as usize * 4],
         });
+        self.composed = None;
         self.display_id = id;
         self.dup = Some(dup);
         self.pointer = Pointer::default();
         Ok(())
+    }
+
+    fn active_display(&self) -> u32 {
+        self.display_id
     }
 }
 
 impl DxgiCapturer {
     fn idle_repeat_due(&mut self) -> Option<RawFrame> {
         let due = self.last_emit.is_none_or(|at| at.elapsed() >= IDLE_REPEAT);
-        if due { self.compose() } else { None }
+        if due { self.compose(false) } else { None }
     }
 }
 

@@ -7,9 +7,16 @@
 // before the keystroke lands. A short fallback timer keeps the key alive when
 // the clipboard is empty or the paste event never fires.
 //
+// Touch devices have no Cmd+V: a Paste button reads the local clipboard
+// (navigator.clipboard.readText — iOS shows its own Paste confirmation) and
+// hands the text to PasteFlow.pasteText, which keeps the same ordering. Where
+// the read isn't possible a PasteSheet lets the user paste into a visible box.
+//
 // Host → controller: auto-write via the async Clipboard API where the
 // context allows (secure context + permission); otherwise the UI shows a
 // chip and the user's tap supplies the gesture for the execCommand fallback.
+
+import { HostOs, MOD_CTRL, MOD_META } from "./protocol";
 
 export interface ClipboardOut {
   sendClipboard(text: string): void;
@@ -71,6 +78,20 @@ export class PasteFlow {
     const modifiers = this.armedModifiers ?? 0;
     this.armedModifiers = null;
     this.swallowKeyUps++;
+    this.deliver(text, modifiers);
+  }
+
+  /**
+   * Paste `text` without a keyboard (a Paste button): host clipboard first,
+   * then the V tap with `modifiers` — the same order and large-paste head
+   * start as the hardware combo. Leaves any armed combo alone, and there's
+   * no physical KeyV keyup to swallow.
+   */
+  pasteText(text: string, modifiers: number): void {
+    this.deliver(text, modifiers);
+  }
+
+  private deliver(text: string | null, modifiers: number): void {
     if (text) {
       this.out.sendClipboard(text);
       if (text.length >= LARGE_PASTE_BYTES) {
@@ -79,6 +100,94 @@ export class PasteFlow {
       }
     }
     this.out.sendKeyTap("KeyV", modifiers);
+  }
+}
+
+/**
+ * Modifiers for a Paste button's V tap. Cmd, as an Apple keyboard's Cmd+V
+ * sends — the remap makes it Ctrl+V on a Windows host — unless no remap
+ * applies and the host pastes with Ctrl (Linux, or Windows from a non-Apple
+ * client). Unknown hosts predate HostInfo, so they're Macs.
+ */
+export function pasteModifiers(hostOs: number | null, cmdAsCtrl: boolean): number {
+  if (cmdAsCtrl) return MOD_META;
+  return hostOs === HostOs.Windows || hostOs === HostOs.Linux ? MOD_CTRL : MOD_META;
+}
+
+interface ClipboardReader {
+  clipboard?: { readText?: () => Promise<string> };
+}
+
+/**
+ * Start reading the local clipboard as text. Call it synchronously inside the
+ * tap (iOS shows its Paste confirmation then). Returns null at once when
+ * there's no async Clipboard API (e.g. a plain-HTTP LAN page) — open a
+ * PasteSheet while still in the gesture. Otherwise the promise never
+ * rejects: it yields null when the read is refused (NotAllowedError: the
+ * confirmation dismissed, permission denied) or fails.
+ */
+export function readLocalClipboard(
+  nav: ClipboardReader | undefined = globalThis.navigator,
+): Promise<string | null> | null {
+  const clipboard = nav?.clipboard;
+  if (typeof clipboard?.readText !== "function") return null;
+  try {
+    return clipboard.readText().then(
+      (text) => text,
+      () => null,
+    );
+  } catch {
+    return Promise.resolve(null);
+  }
+}
+
+/**
+ * Fallback paste: a small sheet with a visible box the user long-presses →
+ * Paste into, then Send. Built on first use. `onDone` runs inside the
+ * Send/Cancel tap, so it may re-raise the soft keyboard.
+ */
+export class PasteSheet {
+  private dialog: HTMLDialogElement | null = null;
+  private field: HTMLTextAreaElement | null = null;
+
+  constructor(
+    private readonly onSend: (text: string) => void,
+    private readonly onDone: () => void,
+  ) {}
+
+  open(): void {
+    if (!this.dialog || !this.field) this.build();
+    const dialog = this.dialog!;
+    const field = this.field!;
+    field.value = "";
+    if (!dialog.open) dialog.showModal();
+    field.focus();
+  }
+
+  private build(): void {
+    const dialog = document.createElement("dialog");
+    dialog.className = "paste-sheet";
+    dialog.innerHTML = `
+      <h2>Paste to host</h2>
+      <p class="muted small">Touch and hold in the box, choose Paste, then Send.</p>
+      <textarea rows="4" autocorrect="off" autocapitalize="off" spellcheck="false" autocomplete="off"></textarea>
+      <div class="row">
+        <button type="button" data-act="cancel">Cancel</button>
+        <button type="button" class="primary" data-act="send">Send</button>
+      </div>`;
+    const field = dialog.querySelector("textarea")!;
+    dialog.addEventListener("click", (e) => {
+      const act = (e.target as HTMLElement).closest("button")?.dataset.act;
+      if (!act) return;
+      const text = field.value;
+      field.value = ""; // don't leave pasted text sitting in the DOM
+      dialog.close();
+      if (act === "send" && text) this.onSend(text);
+      this.onDone();
+    });
+    document.body.appendChild(dialog);
+    this.dialog = dialog;
+    this.field = field;
   }
 }
 

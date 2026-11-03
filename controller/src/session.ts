@@ -85,8 +85,9 @@ export class ProtocolSession {
   }
 
   /** A stalled handshake (no host response, lost pairing reply) must not hang
-   * the UI silently; abort it so the transport tears down. The pairing phase
-   * is exempt — it waits on a human entering a code. */
+   * the UI silently; abort it so the transport tears down. Waiting on a human
+   * to enter a pairing code is exempt: the timer is cleared when the host asks
+   * for one, and the pairing phase never trips it. */
   private armHandshakeTimeout(): void {
     if (this.handshakeTimer) clearTimeout(this.handshakeTimer);
     this.handshakeTimer = setTimeout(() => {
@@ -185,6 +186,7 @@ export class ProtocolSession {
           if (message.ok) {
             this.connect();
           } else {
+            this.clearHandshakeTimeout(); // the user may take a while (or leave the app)
             this.events.onPairingRequired(); // need a code from the host
           }
         } else {

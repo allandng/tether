@@ -124,6 +124,15 @@ impl PairingAuth {
         self.allowlist.devices.is_empty()
     }
 
+    /// True while a pairing code is armed and unexpired. The operator asked
+    /// for a device to pair, so controllers are asked for the code even before
+    /// the first device is paired (see `session::handle_auth_message`).
+    pub fn code_armed(&self, now_unix: u64) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|code| now_unix < code.expires_at)
+    }
+
     pub fn paired_devices(&self) -> &HashMap<String, PairedDevice> {
         &self.allowlist.devices
     }

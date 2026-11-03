@@ -65,6 +65,8 @@ export class H264Stream {
   private decoder: VideoDecoder | null = null;
   private awaitingKeyframe = true;
   private timestamp = 0;
+  /** Host sequence number of the last access unit pushed. */
+  private lastSeq: number | null = null;
   /** decoder timestamp → caller's capture timestamp, resolved on output. */
   private readonly captureTs = new Map<number, number>();
 
@@ -73,7 +75,20 @@ export class H264Stream {
     private readonly onFatal: (detail: string) => void,
   ) {}
 
-  push(annexB: Uint8Array, captureMicros = 0): void {
+  /**
+   * `seq` is the host's per-frame sequence number: every P-frame references
+   * the one before it, so a gap (a frame the host skipped or dropped) means
+   * the deltas that follow would decode into garbage — wait for the next
+   * keyframe instead.
+   */
+  push(annexB: Uint8Array, captureMicros = 0, seq?: number): void {
+    if (seq !== undefined) {
+      if (this.lastSeq !== null && seq !== ((this.lastSeq + 1) >>> 0) && !this.awaitingKeyframe) {
+        console.warn(`frame ${this.lastSeq} → ${seq}: missing frames, resyncing at next keyframe`);
+        this.awaitingKeyframe = true;
+      }
+      this.lastSeq = seq;
+    }
     const key = isKeyframe(annexB);
     // Bounded latency: if decode can't keep up with arrival (e.g. software
     // fallback), drop the backlog and resync at the next keyframe instead of
@@ -145,5 +160,16 @@ export class H264Stream {
     }
     this.decoder = null;
     this.awaitingKeyframe = true;
+  }
+
+  /**
+   * A new connection: the next access units continue a stream this decoder
+   * has not seen (another session, perhaps another host), so start over at
+   * its first keyframe.
+   */
+  restart(): void {
+    this.reset();
+    this.lastSeq = null;
+    this.captureTs.clear();
   }
 }

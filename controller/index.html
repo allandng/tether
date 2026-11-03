@@ -39,6 +39,15 @@
         font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
         overflow: hidden;
       }
+      html {
+        /* no font inflation on rotate */
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+      }
+      body {
+        /* no double-tap zoom (or its tap delay) on the app chrome */
+        touch-action: manipulation;
+      }
       #app {
         height: 100%;
       }
@@ -51,8 +60,10 @@
         font: inherit;
         color: inherit;
       }
-      button {
+      button,
+      .upload {
         cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
       }
       input[type="text"],
       input[type="password"],
@@ -77,8 +88,11 @@
         padding: 6px 10px;
         line-height: 1;
       }
-      .icon:hover {
-        background: #36363b;
+      /* hover only where it exists: on touch, :hover sticks after a tap */
+      @media (hover: hover) {
+        .icon:hover {
+          background: #36363b;
+        }
       }
       .icon.small {
         padding: 2px 7px;
@@ -153,8 +167,10 @@
         border-radius: 12px;
         padding: 14px;
       }
-      .machine:hover:not(:disabled) {
-        background: #242428;
+      @media (hover: hover) {
+        .machine:hover:not(:disabled) {
+          background: #242428;
+        }
       }
       .machine:disabled {
         cursor: default;
@@ -215,6 +231,27 @@
       }
       .empty p {
         margin: 0 0 10px;
+      }
+      .hint {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--accent);
+        border-radius: 12px;
+        padding: 12px 14px;
+        margin-bottom: 16px;
+        font-size: 14px;
+        line-height: 1.45;
+        color: var(--muted);
+      }
+      .hint p {
+        flex: 1;
+        margin: 0;
+      }
+      .hint strong {
+        color: var(--text);
       }
       #lan-box {
         margin-top: 24px;
@@ -297,6 +334,14 @@
         height: 100%;
         position: relative;
         background: #000;
+        /* Pinching anywhere outside the canvas would zoom the whole page (iOS
+           ignores user-scalable=no, and manipulation still allows pinch). */
+        touch-action: pan-x pan-y;
+        /* keyboard-aware: shrink to the visual viewport (viewport.ts sets the
+           vars only while the iOS keyboard hides part of the page) */
+        box-sizing: border-box;
+        padding-top: var(--vv-top, 0px);
+        padding-bottom: var(--vv-bottom, 0px);
       }
       #bar {
         display: flex;
@@ -309,6 +354,12 @@
         background: var(--panel);
         flex: none;
         flex-wrap: wrap;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #bar input {
+        -webkit-user-select: text;
+        user-select: text;
       }
       #title {
         font-weight: 600;
@@ -333,7 +384,8 @@
         background: var(--ok);
       }
       #kbd.on,
-      #speaker.on {
+      #speaker.on,
+      #autohide.on {
         background: var(--accent);
         border-color: var(--accent);
       }
@@ -343,23 +395,234 @@
       }
       #stats {
         margin-left: auto;
+        order: 1; /* last in the bar, though it shares #ident with the title */
         font-variant-numeric: tabular-nums;
         color: var(--muted);
         font-size: 13px;
+      }
+      /* Full (desktop) bar: the wrappers dissolve, so every control is a bar
+         item exactly as before; the compact-only controls don't show. */
+      #ident,
+      #more {
+        display: contents;
+      }
+      #more-btn,
+      #more-scrim,
+      .sheet-only {
+        display: none;
       }
       @media (pointer: coarse) and (max-width: 600px) {
         #bar .icon {
           padding: 10px 12px;
         }
+      }
+
+      /* ---- compact bar: phones, tablets, narrow windows ------------------ */
+      /* Keep this query in step with COMPACT_QUERY in src/sessionbar.ts. One
+         row: back, status/host, ⌨, 🖱, ⋯; the rest open from ⋯ as a sheet. */
+      @media (pointer: coarse), (max-width: 600px) {
+        #bar {
+          position: relative;
+          z-index: 2; /* the sheet overlays the stage; #files (also 2, later) still covers the bar */
+        }
+        #ident {
+          display: flex;
+          flex-direction: column;
+          flex: 1 1 0;
+          min-width: 0;
+          line-height: 1.25;
+        }
+        #title {
+          max-width: none;
+        }
         #stats {
-          flex: 1 1 100%;
           margin-left: 0;
+          font-size: 12px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        #stats:empty {
+          display: none;
+        }
+        /* not connected: the line carries pairing prompts and errors — wrap it
+           rather than cut it off (the bar never hides then) */
+        #dot:not(.connected) + #ident #stats {
+          white-space: normal;
+          overflow-wrap: anywhere;
+        }
+        #more-btn {
+          display: inline-block;
+          position: relative;
+        }
+        #more-btn.attn::after {
+          content: "";
+          position: absolute;
+          top: 3px;
+          right: 3px;
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: var(--accent);
+        }
+        #more {
+          display: none;
+          position: absolute;
+          top: calc(100% + 4px);
+          right: max(8px, env(safe-area-inset-right));
+          z-index: 2;
+          flex-direction: column;
+          gap: 2px;
+          min-width: 220px;
+          /* vh ignores the iOS keyboard: also stop above it — the sheet starts
+             under the bar, inside the visible area (--vvh: viewport.ts,
+             --bar-h: sessionbar.ts) — and scroll the rest */
+          max-height: min(70vh, calc(var(--vvh, 100vh) - var(--bar-h, 0px) - 16px));
+          overflow-y: auto;
+          box-sizing: border-box;
+          padding: 6px;
+          background: var(--panel);
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
+        }
+        #bar.more-open #more {
+          display: flex;
+        }
+        /* outside taps land here (closing the sheet), not on the remote screen */
+        #bar.more-open #more-scrim {
+          display: block;
+          position: fixed;
+          inset: 0;
+          z-index: 1;
+        }
+        #more .icon {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          width: 100%;
+          padding: 10px 12px;
+          text-align: left;
+          background: transparent;
+          border-color: transparent;
+        }
+        #more .icon.on {
+          background: var(--accent);
+          border-color: var(--accent);
+        }
+        @media (hover: hover) {
+          #more .icon:not(.on):hover {
+            background: var(--raised);
+          }
+        }
+        #more .icon::after {
+          content: attr(data-label);
+          font-size: 15px;
+        }
+        #more select {
+          width: 100%;
+          margin-bottom: 4px;
+        }
+        #pair {
+          flex: 1 1 100%;
+        }
+        #pair input {
+          flex: 1;
+        }
+      }
+
+      /* ---- immersive: the auto-hide bar overlays the stage ---------------- */
+      /* Set by sessionbar.ts (compact + auto-hide on). The bar slides over the
+         stage instead of resizing it, so the remote screen never moves. */
+      #session-view.bar-overlay #bar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        box-shadow: 0 2px 12px rgb(0 0 0 / 40%);
+        transition:
+          transform 0.22s ease,
+          visibility 0s;
+      }
+      #session-view.bar-overlay.bar-hidden #bar {
+        transform: translateY(calc(-100% - 16px)); /* its shadow too */
+        visibility: hidden; /* out of the tab order and a11y tree once gone */
+        transition:
+          transform 0.22s ease,
+          visibility 0s 0.22s;
+      }
+      #session-view.bar-overlay #stage {
+        padding-top: env(safe-area-inset-top); /* the bar no longer clears the notch */
+      }
+      #session-view.bar-overlay #zoom-reset {
+        top: calc(var(--bar-h, 0px) + 10px);
+        transition: top 0.22s ease;
+      }
+      #session-view.bar-overlay.bar-hidden #zoom-reset {
+        top: calc(env(safe-area-inset-top) + 10px);
+      }
+      #bar-handle {
+        position: absolute;
+        z-index: 2;
+        top: env(safe-area-inset-top);
+        left: 50%;
+        transform: translateX(-50%);
+        width: 72px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        touch-action: manipulation;
+        animation: handle-in 0.3s ease 0.15s both;
+      }
+      #bar-handle::before {
+        content: "";
+        display: block;
+        width: 44px;
+        height: 5px;
+        margin: 8px auto 0;
+        border-radius: 3px;
+        background: rgb(255 255 255 / 45%);
+        box-shadow: 0 0 0 1px rgb(0 0 0 / 35%);
+      }
+      #bar-handle.attn::before {
+        background: var(--accent);
+      }
+      @keyframes handle-in {
+        from {
+          opacity: 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #session-view.bar-overlay #bar,
+        #session-view.bar-overlay #zoom-reset {
+          transition: none;
+        }
+        #bar-handle {
+          animation: none;
         }
       }
       #stage {
         flex: 1;
         min-height: 0;
         display: flex;
+        /* clear of the home indicator and, in landscape, the notch (the bar
+           above already handles the top) */
+        padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+        position: relative; /* anchors the zoom chip */
+        overflow: hidden; /* a zoomed canvas must not paint over the bar */
+      }
+      #zoom-reset {
+        position: absolute;
+        top: 10px;
+        right: max(10px, env(safe-area-inset-right));
+        padding: 6px 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgb(28 28 31 / 85%);
+        font-size: 13px;
+        font-weight: 600;
+        touch-action: manipulation;
       }
       #view {
         width: 100%;
@@ -368,6 +631,7 @@
         outline: none;
         /* swallow all native touch behaviors so gestures reach our handlers */
         touch-action: none;
+        -webkit-tap-highlight-color: transparent;
         -webkit-touch-callout: none;
         -webkit-user-select: none;
         user-select: none;
@@ -384,7 +648,8 @@
         box-sizing: border-box;
         background: var(--panel);
         border-left: 1px solid var(--line);
-        padding: max(14px, env(safe-area-inset-top)) 16px 16px;
+        padding: max(14px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) 16px;
         overflow-y: auto;
         z-index: 2;
         box-shadow: -8px 0 24px rgb(0 0 0 / 40%);
@@ -429,6 +694,86 @@
       }
       .transfer.complete progress {
         accent-color: var(--ok);
+      }
+      .transfer .save {
+        display: block;
+        width: 100%;
+        margin-top: 8px;
+      }
+
+      /* ---- special-keys toolbar (above the soft keyboard) ---------------- */
+      #xkeys {
+        flex: none;
+        display: flex;
+        gap: 8px;
+        padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left));
+        /* the home indicator only matters when no keyboard sits below */
+        padding-bottom: max(6px, calc(env(safe-area-inset-bottom) - var(--vv-bottom, 0px)));
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #xkeys .xk-mods,
+      #xkeys .xk-strip {
+        display: flex;
+        gap: 5px;
+      }
+      #xkeys .xk-mods {
+        flex: none;
+      }
+      #xkeys .xk-strip {
+        flex: 1;
+        min-width: 0;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+      }
+      #xkeys .xk-strip::-webkit-scrollbar {
+        display: none;
+      }
+      #xkeys button {
+        flex: none;
+        min-width: 40px;
+        height: 36px;
+        padding: 0 9px;
+        border-radius: 7px;
+        background: var(--raised);
+        border: 1px solid var(--line);
+        font-size: 15px;
+        /* no double-tap zoom: a double-tap locks a modifier */
+        touch-action: manipulation;
+      }
+      #xkeys button.latched {
+        border-color: var(--accent);
+        color: #9ec0ff;
+      }
+      #xkeys button.locked {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      #xkeys [data-act="paste"] {
+        color: #9ec0ff;
+      }
+
+      /* ---- paste fallback (no readable clipboard) ------------------------ */
+      dialog.paste-sheet {
+        /* top of the visible area, clear of the keyboard */
+        margin-top: calc(var(--vv-top, 0px) + max(16px, env(safe-area-inset-top)));
+        max-height: calc(var(--vvh, 100%) - 32px);
+      }
+      .paste-sheet textarea {
+        width: 100%;
+        box-sizing: border-box;
+        background: var(--raised);
+        color: inherit;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font: inherit;
+        font-size: 16px; /* below 16px iOS zooms the page on focus */
+        resize: vertical;
       }
     </style>
   </head>

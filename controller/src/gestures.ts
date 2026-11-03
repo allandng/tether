@@ -18,6 +18,10 @@
 //   * Long-press is DEFERRED: the timer arms the gesture but emits nothing;
 //     lifting still → right click, moving instead → left-button hold+drag, so
 //     a long-press-drag (text selection) never pops a context menu first.
+//
+// Two-finger scroll is content-follows-fingers (iOS-native) and coasts after
+// a flick: the release velocity decays exponentially, driven through the same
+// deadline/tick() channel as long-press. Any new finger stops the coast.
 
 export type Mode = "touch" | "trackpad";
 
@@ -27,12 +31,18 @@ export interface GestureSink {
   up(button: number): void;
   click(button: number): void;
   doubleClick(): void;
+  /** Wire sign = DOM wheel delta: +dy scrolls the document down (content
+   * moves up), exactly what the desktop wheel path forwards. */
   scroll(dx: number, dy: number): void;
   /** LOCAL view zoom — never forwarded to the host. `scale` is cumulative
    * from the start of the current pinch; `focal` is the live centroid. */
   zoom(scale: number, focalX: number, focalY: number): void;
   /** The current pinch ended — commit the live zoom transform. */
   zoomEnd(): void;
+  /** LOCAL view pan in client px (trackpad edge auto-pan while zoomed);
+   * returns the shift actually applied after the view's own clamping.
+   * Optional: without it the cursor just stops at the visible edge. */
+  pan?(dx: number, dy: number): { dx: number; dy: number };
 }
 
 export interface Rect {
@@ -53,6 +63,11 @@ export interface Thresholds {
   pinchDistPx: number;
   scrollGain: number;
   trackpadAccel: number;
+  momentumTauMs: number; // decay time constant of a released scroll
+  momentumMinVelocity: number; // px/ms; coast stops below (never starts under) this
+  momentumMaxMs: number; // hard cap on one coast
+  momentumFrameMs: number; // emit cadence while coasting
+  momentumSampleMs: number; // release velocity = travel over this trailing window
 }
 
 export const DEFAULT_THRESHOLDS: Thresholds = {
@@ -66,13 +81,43 @@ export const DEFAULT_THRESHOLDS: Thresholds = {
   pinchDistPx: 16,
   scrollGain: 1.0,
   trackpadAccel: 1.0,
+  momentumTauMs: 325,
+  momentumMinVelocity: 0.05,
+  momentumMaxMs: 2000,
+  momentumFrameMs: 16,
+  momentumSampleMs: 100,
 };
 
 export interface GestureConfig {
   mode: Mode;
+  /** The displayed content rect (client px, zoom transform included). */
   bounds: Rect;
+  /** The on-screen part of the stage; the trackpad cursor stays inside
+   * bounds ∩ visible, and edge auto-pan reveals the rest when zoomed. */
+  visible?: Rect;
   seedCursor?: { x: number; y: number };
   thresholds?: Partial<Thresholds>;
+}
+
+/**
+ * Trackpad edge auto-pan: how far to shift a zoomed view so the cursor's
+ * desired point (x, y) stays visible — limited, per axis, to the content
+ * still hidden past the edge it's pushing against. Returns the content
+ * translation in client px (negative = content moves left/up); zero when
+ * the point is inside `visible` or nothing is hidden that way (unzoomed).
+ */
+export function edgePan(x: number, y: number, content: Rect, visible: Rect): { dx: number; dy: number } {
+  return {
+    dx: panAxis(x, content.left, content.width, visible.left, visible.width),
+    dy: panAxis(y, content.top, content.height, visible.top, visible.height),
+  };
+}
+
+function panAxis(p: number, cStart: number, cLen: number, vStart: number, vLen: number): number {
+  const vEnd = vStart + vLen;
+  if (p > vEnd) return -Math.min(p - vEnd, Math.max(0, cStart + cLen - vEnd)) || 0;
+  if (p < vStart) return Math.min(vStart - p, Math.max(0, vStart - cStart));
+  return 0;
 }
 
 const enum State {
@@ -96,8 +141,25 @@ interface Pointer {
   maxDist: number;
 }
 
+/** A released two-finger scroll coasting to a stop. */
+interface Momentum {
+  vx: number; // wire scroll units per ms at t0
+  vy: number;
+  t0: number;
+  end: number; // speed falls under the cutoff (or the cap) here
+  next: number; // next emit deadline
+  sentX: number; // whole units emitted so far
+  sentY: number;
+}
+
 const dist = (ax: number, ay: number, bx: number, by: number) =>
   Math.hypot(ax - bx, ay - by);
+
+/** Round to an integer, never -0 (keeps emitted deltas tidy). */
+const round = (v: number) => Math.round(v) || 0;
+
+/** Big enough to aim into (a hidden view or pre-first-frame rect isn't). */
+const usable = (r: Rect) => r.width > 1 && r.height > 1;
 
 export class GestureMachine {
   private state = State.Idle;
@@ -106,6 +168,7 @@ export class GestureMachine {
   private mode: Mode;
   private readonly t: Thresholds;
   private bounds: Rect;
+  private visible: Rect | null;
 
   private vx: number;
   private vy: number;
@@ -119,12 +182,23 @@ export class GestureMachine {
   private cx0 = 0;
   private cy0 = 0;
 
+  // two-finger scroll: cumulative unrounded travel (wire units), the whole
+  // units already sent, and recent samples of the travel for the release
+  // velocity
+  private scrollX = 0;
+  private scrollY = 0;
+  private scrollSentX = 0;
+  private scrollSentY = 0;
+  private scrollSamples: { t: number; x: number; y: number }[] = [];
+  private momentum: Momentum | null = null;
+
   constructor(
     private readonly sink: GestureSink,
     config: GestureConfig,
   ) {
     this.mode = config.mode;
     this.bounds = config.bounds;
+    this.visible = config.visible && usable(config.visible) ? config.visible : null;
     this.t = { ...DEFAULT_THRESHOLDS, ...config.thresholds };
     const seed = config.seedCursor ?? {
       x: config.bounds.left + config.bounds.width / 2,
@@ -146,14 +220,32 @@ export class GestureMachine {
     return true;
   }
 
-  setBounds(bounds: Rect): void {
+  /**
+   * New displayed content rect (and visible stage): rotation, resize, zoom,
+   * pan. The trackpad cursor keeps its CONTENT point across the change (it
+   * sits on the remote desktop, not on the glass), then is clamped back into
+   * bounds ∩ visible. Unusable rects (no frame yet, view hidden) are ignored.
+   */
+  setBounds(bounds: Rect, visible?: Rect): void {
+    if (visible && usable(visible)) this.visible = visible;
+    if (!usable(bounds)) return;
+    const prev = this.bounds;
     this.bounds = bounds;
-    if (!this.cursorSeeded && bounds.width > 1) {
+    if (!this.cursorSeeded) {
       // first valid displayed rect: center the trackpad cursor here
       this.vx = bounds.left + bounds.width / 2;
       this.vy = bounds.top + bounds.height / 2;
       this.cursorSeeded = true;
+    } else if (usable(prev)) {
+      this.vx = bounds.left + ((this.vx - prev.left) / prev.width) * bounds.width;
+      this.vy = bounds.top + ((this.vy - prev.top) / prev.height) * bounds.height;
     }
+    this.clampCursor();
+  }
+
+  /** The trackpad virtual cursor, client px (where the next tap clicks). */
+  get cursor(): { x: number; y: number } {
+    return { x: this.vx, y: this.vy };
   }
 
   reset(): void {
@@ -166,9 +258,11 @@ export class GestureMachine {
     this.order = [];
     this.longPressDeadline = null;
     this.lastTap = null;
+    this.momentum = null;
   }
 
   onDown(id: number, x: number, y: number, t: number): number | null {
+    this.momentum = null; // a new touch catches a coasting scroll
     this.pointers.set(id, { startX: x, startY: y, startT: t, x, y, maxDist: 0 });
     this.order.push(id);
 
@@ -239,10 +333,10 @@ export class GestureMachine {
         break;
       }
       case State.TwoPending:
-        this.classifyTwoFinger();
+        this.classifyTwoFinger(t);
         break;
       case State.TwoScroll:
-        this.emitScroll();
+        this.emitScroll(t);
         break;
       case State.TwoPinch:
         this.emitZoom();
@@ -299,8 +393,12 @@ export class GestureMachine {
         // first of the two fingers lifting ends a potential two-finger tap;
         // both pointers are still in the map, so classify before removing.
         if (this.twoFingerWasTap(t)) {
-          const c = this.centroidOfStarts();
-          const pt = this.mode === "touch" ? c : { x: this.vx, y: this.vy };
+          // touch: the first finger's point — the centroid of two spread
+          // fingers can be empty space; trackpad: the virtual cursor
+          const [first] = this.twoPointers();
+          const pt = this.mode === "touch"
+            ? { x: first.startX, y: first.startY }
+            : { x: this.vx, y: this.vy };
           this.sink.moveAbs(pt.x, pt.y);
           this.sink.click(2);
         }
@@ -313,6 +411,8 @@ export class GestureMachine {
       case State.TwoPinch:
       case State.TwoDraining: {
         if (this.state === State.TwoPinch) this.sink.zoomEnd();
+        // the first finger up ends the scroll; a flick coasts on from here
+        if (this.state === State.TwoScroll) this.startMomentum(t);
         this.removePointer(id);
         if (this.pointers.size === 0) this.toIdle();
         else this.state = State.TwoDraining;
@@ -329,6 +429,7 @@ export class GestureMachine {
   onCancel(id: number): number | null {
     this.releaseHeld(); // never leave a button stuck
     if (this.state === State.TwoPinch) this.sink.zoomEnd();
+    this.momentum = null; // the system took the touch over: don't scroll on
     this.removePointer(id);
     if (this.pointers.size === 0) this.toIdle();
     else if (this.state !== State.Idle) this.state = State.TwoDraining;
@@ -349,6 +450,7 @@ export class GestureMachine {
       }
       this.longPressDeadline = null;
     }
+    if (this.momentum && t >= this.momentum.next) this.stepMomentum(t);
     return this.deadline();
   }
 
@@ -360,6 +462,8 @@ export class GestureMachine {
   }
 
   private deadline(): number | null {
+    // exclusive: any onDown (the only way into PendingTap) stops momentum
+    if (this.momentum) return this.momentum.next;
     return this.state === State.PendingTap ? this.longPressDeadline : null;
   }
 
@@ -394,19 +498,33 @@ export class GestureMachine {
     }
   }
 
-  /** Trackpad: advance the virtual cursor by the per-move delta, clamped. */
+  /**
+   * Trackpad: advance the virtual cursor by the per-move delta. Pushing past
+   * the visible edge of a zoomed view pans it (the cursor stays at the edge
+   * and travels on over newly revealed content); then clamp.
+   */
   private advanceCursor(prevX: number, prevY: number, x: number, y: number): void {
     if (this.mode !== "trackpad") return;
-    this.vx = clamp(
-      this.vx + this.t.trackpadAccel * (x - prevX),
-      this.bounds.left,
-      this.bounds.left + this.bounds.width,
-    );
-    this.vy = clamp(
-      this.vy + this.t.trackpadAccel * (y - prevY),
-      this.bounds.top,
-      this.bounds.top + this.bounds.height,
-    );
+    this.vx += this.t.trackpadAccel * (x - prevX);
+    this.vy += this.t.trackpadAccel * (y - prevY);
+    if (this.visible && this.sink.pan) {
+      const want = edgePan(this.vx, this.vy, this.bounds, this.visible);
+      if (want.dx !== 0 || want.dy !== 0) {
+        const got = this.sink.pan(want.dx, want.dy);
+        // track the moved content rect ourselves (the next setBounds confirms)
+        this.bounds = { ...this.bounds, left: this.bounds.left + got.dx, top: this.bounds.top + got.dy };
+        this.vx += got.dx;
+        this.vy += got.dy;
+      }
+    }
+    this.clampCursor();
+  }
+
+  /** Keep the virtual cursor on content the user can actually see. */
+  private clampCursor(): void {
+    const r = (this.visible && intersect(this.bounds, this.visible)) || this.bounds;
+    this.vx = clamp(this.vx, r.left, r.left + r.width);
+    this.vy = clamp(this.vy, r.top, r.top + r.height);
   }
 
   private endSingle(id: number): void {
@@ -456,11 +574,6 @@ export class GestureMachine {
     return [ps[0]!, ps[1]!];
   }
 
-  private centroidOfStarts(): { x: number; y: number } {
-    const [a, b] = this.twoPointers();
-    return { x: (a.startX + b.startX) / 2, y: (a.startY + b.startY) / 2 };
-  }
-
   private twoFingerWasTap(t: number): boolean {
     const [a, b] = this.twoPointers();
     const quick =
@@ -470,7 +583,7 @@ export class GestureMachine {
     return quick && still;
   }
 
-  private classifyTwoFinger(): void {
+  private classifyTwoFinger(t: number): void {
     const [a, b] = this.twoPointers();
     const d = dist(a.x, a.y, b.x, b.y);
     const cx = (a.x + b.x) / 2;
@@ -485,18 +598,88 @@ export class GestureMachine {
       this.state = State.TwoScroll;
       this.cx0 = cx; // reset reference so the first scroll delta is from here
       this.cy0 = cy;
+      this.scrollX = 0;
+      this.scrollY = 0;
+      this.scrollSentX = 0;
+      this.scrollSentY = 0;
+      this.scrollSamples = [{ t, x: 0, y: 0 }];
     }
   }
 
-  private emitScroll(): void {
+  private emitScroll(t: number): void {
     const [a, b] = this.twoPointers();
     const cx = (a.x + b.x) / 2;
     const cy = (a.y + b.y) / 2;
-    const dx = Math.round(this.t.scrollGain * (cx - this.cx0));
-    const dy = Math.round(this.t.scrollGain * (cy - this.cy0));
+    // Content follows the fingers, as in native iOS scrolling: fingers
+    // moving UP scroll the document DOWN, which on the wire (DOM wheel sign)
+    // is +dy. So the wire delta is the NEGATED centroid travel — the same
+    // sign a natural-scrolling Mac trackpad's wheel event carries.
+    const rawX = this.t.scrollGain * (this.cx0 - cx);
+    const rawY = this.t.scrollGain * (this.cy0 - cy);
     this.cx0 = cx;
     this.cy0 = cy;
+    this.scrollX += rawX;
+    this.scrollY += rawY;
+    this.scrollSamples.push({ t, x: this.scrollX, y: this.scrollY });
+    const horizon = t - this.t.momentumSampleMs;
+    while (this.scrollSamples.length > 0 && this.scrollSamples[0]!.t < horizon) {
+      this.scrollSamples.shift();
+    }
+    // Emit the whole units of the cumulative travel not yet sent. Rounding
+    // each event's delta instead loses the remainder: pointer events come one
+    // finger at a time, so a slow drag moves the centroid by ±0.5 px per
+    // event, which rounded to +1 going up (double speed) and to 0 going down
+    // (no scroll at all) — seen on iOS.
+    const dx = round(this.scrollX) - this.scrollSentX;
+    const dy = round(this.scrollY) - this.scrollSentY;
+    this.scrollSentX += dx;
+    this.scrollSentY += dy;
     if (dx !== 0 || dy !== 0) this.sink.scroll(dx, dy);
+  }
+
+  /**
+   * Release velocity = scroll travel over the trailing sample window, up to
+   * the lift time `t` (a pause before lifting therefore damps it to zero).
+   * Fast enough → coast for as long as the decay stays above the cutoff.
+   */
+  private startMomentum(t: number): void {
+    const samples = this.scrollSamples;
+    this.scrollSamples = [];
+    const first = samples.find((s) => s.t >= t - this.t.momentumSampleMs);
+    if (!first || t <= first.t) return;
+    const vx = (this.scrollX - first.x) / (t - first.t);
+    const vy = (this.scrollY - first.y) / (t - first.t);
+    const speed = Math.hypot(vx, vy);
+    const { momentumTauMs: tau, momentumMinVelocity: min } = this.t;
+    if (tau <= 0 || !(speed > min)) return;
+    const run = Math.min(this.t.momentumMaxMs, tau * Math.log(speed / min));
+    this.momentum = {
+      vx,
+      vy,
+      t0: t,
+      end: t + run,
+      next: Math.min(t + run, t + this.t.momentumFrameMs),
+      sentX: 0,
+      sentY: 0,
+    };
+  }
+
+  /** Emit the coast's progress up to `t`, in whole units. */
+  private stepMomentum(t: number): void {
+    const m = this.momentum!;
+    const tau = this.t.momentumTauMs;
+    // Closed-form distance under v = v0·e^(-(t-t0)/τ): exact whatever the
+    // timer jitter, so a late tick catches up rather than slowing the coast.
+    const k = tau * (1 - Math.exp(-(Math.min(t, m.end) - m.t0) / tau));
+    const totX = round(m.vx * k);
+    const totY = round(m.vy * k);
+    const dx = totX - m.sentX;
+    const dy = totY - m.sentY;
+    m.sentX = totX;
+    m.sentY = totY;
+    if (dx !== 0 || dy !== 0) this.sink.scroll(dx, dy);
+    if (t >= m.end) this.momentum = null;
+    else m.next = Math.min(m.end, t + this.t.momentumFrameMs);
   }
 
   private emitZoom(): void {
@@ -509,4 +692,13 @@ export class GestureMachine {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
+}
+
+/** Overlap of two rects, or null if they don't overlap. */
+function intersect(a: Rect, b: Rect): Rect | null {
+  const left = Math.max(a.left, b.left);
+  const top = Math.max(a.top, b.top);
+  const right = Math.min(a.left + a.width, b.left + b.width);
+  const bottom = Math.min(a.top + a.height, b.top + b.height);
+  return right > left && bottom > top ? { left, top, width: right - left, height: bottom - top } : null;
 }

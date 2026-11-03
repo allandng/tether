@@ -104,7 +104,17 @@ async fn main() -> anyhow::Result<()> {
         .upload_dir
         .clone()
         .unwrap_or_else(tetherd::files::FileConfig::default_dir);
-    tetherd::files::sweep_stale_parts(&upload_dir);
+    {
+        // Off the startup path: on macOS the first touch of ~/Downloads from a
+        // LaunchAgent raises a privacy prompt, and the access may wait on it.
+        let dir = upload_dir.clone();
+        let _ = std::thread::Builder::new()
+            .name("tether-upload-dir".into())
+            .spawn(move || {
+                tetherd::files::check_upload_dir(&dir);
+                tetherd::files::sweep_stale_parts(&dir);
+            });
+    }
     let state = ServerState {
         resolution: pipeline.resolution,
         frames: pipeline.frames,
@@ -148,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         device_id: host_name.clone(),
         transports,
         audio: state.audio.is_some(),
+        upload_dir: state.files.dir.clone(),
     };
     tokio::spawn(async move {
         if let Err(e) = tetherd::control::serve(control).await {
@@ -245,6 +256,9 @@ async fn run_command(command: &tetherd::config::Command, args: &Args) -> anyhow:
             for d in &st.displays {
                 println!("  display   {d}");
             }
+            for line in st.permission_lines() {
+                println!("{line}");
+            }
             return Ok(());
         }
         Command::Setup {
@@ -341,9 +355,21 @@ fn start_capture(
     bitrate_kbps: u32,
 ) -> anyhow::Result<tetherd::pipeline::Pipeline> {
     use tetherd::capture::FrameEncoder;
+    use tetherd::capture::macos::{CaptureFormat, SckCapturer};
     use tetherd::config::CodecArg;
+    // H.264 takes NV12 straight from the capture IOSurfaces (zero-copy), no
+    // larger than the hardware encoder handles; JPEG reads BGRA bytes.
+    let format = match codec {
+        CodecArg::Jpeg => CaptureFormat::Bgra,
+        CodecArg::H264 => CaptureFormat::Nv12,
+    };
     tetherd::pipeline::start(
-        || tetherd::capture::macos::SckCapturer::main_display(30),
+        move || match codec {
+            CodecArg::Jpeg => SckCapturer::main_display(30, format),
+            CodecArg::H264 => {
+                SckCapturer::main_display_within(30, format, tetherd::encode::h264::MAX_SIZE)
+            }
+        },
         move || -> anyhow::Result<Box<dyn FrameEncoder>> {
             Ok(match codec {
                 CodecArg::Jpeg => Box::new(tetherd::encode::JpegEncoder::new(75)?),

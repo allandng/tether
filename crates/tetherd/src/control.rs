@@ -16,15 +16,19 @@
 //!
 //! Wire format: one JSON request line, one JSON response line, close.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use futures_util::future::{BoxFuture, FutureExt, Shared};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, Semaphore, watch};
 use tracing::info;
 
 use crate::auth::PairingAuth;
+use crate::files::DirAccess;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -43,6 +47,66 @@ pub struct Status {
     pub displays: Vec<String>,
     pub paired_devices: usize,
     pub audio: bool,
+    // Added after the first release, so optional both ways: an older daemon
+    // omits them (`default`) and an older CLI ignores them.
+    /// macOS Screen Recording grant *of the daemon process* (the CLI runs in
+    /// another TCC context, so only the daemon can answer). `None` elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_recording: Option<bool>,
+    /// macOS Accessibility grant (`AXIsProcessTrusted`) of the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility: Option<bool>,
+    /// Where uploads land.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_dir: Option<String>,
+    /// Whether the daemon can use [`Status::upload_dir`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_dir_access: Option<DirAccess>,
+}
+
+impl Status {
+    /// `tetherd status` lines for the grants and the upload folder, with what
+    /// to do about anything missing. Empty for a daemon that predates them.
+    pub fn permission_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(granted) = self.screen_recording {
+            out.push(format!(
+                "  permission  Screen Recording: {}",
+                if granted {
+                    "granted"
+                } else {
+                    "NOT granted — nothing can be captured; approve tetherd in System Settings → \
+                     Privacy & Security → Screen Recording, then restart it"
+                }
+            ));
+        }
+        if let Some(granted) = self.accessibility {
+            out.push(format!(
+                "  permission  Accessibility: {}",
+                if granted {
+                    "granted"
+                } else {
+                    "NOT granted — remote input is ignored; enable tetherd in System Settings → \
+                     Privacy & Security → Accessibility"
+                }
+            ));
+        }
+        if let Some(dir) = &self.upload_dir {
+            let access = self.upload_dir_access.unwrap_or(DirAccess::Unknown);
+            let state = match access {
+                DirAccess::Ok => "ok",
+                DirAccess::Missing => "not created yet (the first upload creates it)",
+                DirAccess::Denied => "NO ACCESS",
+                DirAccess::Error => "UNUSABLE",
+                DirAccess::TimedOut => "check timed out",
+                DirAccess::Unknown => "unknown",
+            };
+            let advice = access.advice();
+            let sep = if advice.is_empty() { "" } else { " — " };
+            out.push(format!("  uploads     {dir}: {state}{sep}{advice}"));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +130,102 @@ pub struct ControlContext {
     pub device_id: String,
     pub transports: Vec<String>,
     pub audio: bool,
+    /// Upload folder, probed for status requests (cached briefly).
+    pub upload_dir: std::path::PathBuf,
+}
+
+/// The daemon's own macOS grants; `(None, None)` on other platforms.
+fn host_grants() -> (Option<bool>, Option<bool>) {
+    #[cfg(target_os = "macos")]
+    {
+        (
+            Some(crate::macos_perms::screen_recording_granted()),
+            Some(crate::macos_perms::accessibility_granted()),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (None, None)
+    }
+}
+
+/// A probe result is reused for this long.
+const PROBE_TTL: Duration = Duration::from_secs(30);
+/// How long a status request waits for a probe (the CLI gives up after 5 s).
+const PROBE_WAIT: Duration = Duration::from_secs(2);
+
+/// One shared upload-folder probe for all status requests.
+static UPLOAD_PROBE: ProbeCache = ProbeCache::new(PROBE_TTL, PROBE_WAIT);
+
+/// Probe the upload folder off the async threads, bounded: on macOS a first
+/// access to a protected folder can wait on a privacy prompt. Cached and
+/// shared ([`ProbeCache`]), so `tetherd status` in a loop neither parks a
+/// blocking thread per call nor churns probe files in ~/Downloads.
+async fn probe_upload_dir(dir: &Path) -> DirAccess {
+    UPLOAD_PROBE
+        .get(dir, |dir| {
+            DirAccess::from_probe(&crate::files::probe_dir(&dir))
+        })
+        .await
+}
+
+/// A probe finishing at the instant it records.
+type ProbeFuture = Shared<BoxFuture<'static, (Instant, DirAccess)>>;
+
+/// A blocking directory probe, cached for `ttl` and never run twice at once:
+/// while one is in flight (say, waiting on a macOS privacy prompt), later
+/// requests wait on *that* one — each for at most `wait`, answering
+/// [`DirAccess::TimedOut`] — instead of starting another.
+struct ProbeCache {
+    ttl: Duration,
+    wait: Duration,
+    /// The latest probe (running or finished) and the directory it probes.
+    slot: std::sync::Mutex<Option<(PathBuf, ProbeFuture)>>,
+}
+
+impl ProbeCache {
+    const fn new(ttl: Duration, wait: Duration) -> Self {
+        ProbeCache {
+            ttl,
+            wait,
+            slot: std::sync::Mutex::new(None),
+        }
+    }
+
+    async fn get(
+        &self,
+        dir: &Path,
+        probe: impl FnOnce(PathBuf) -> DirAccess + Send + 'static,
+    ) -> DirAccess {
+        let pending = {
+            let mut slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let reuse = match &*slot {
+                // polled here so a probe that finished unobserved counts
+                Some((d, fut)) if d == dir => match fut.clone().now_or_never() {
+                    Some((at, access)) if at.elapsed() < self.ttl => return access,
+                    Some(_) => None,           // stale: probe again
+                    None => Some(fut.clone()), // in flight: share it
+                },
+                _ => None,
+            };
+            reuse.unwrap_or_else(|| {
+                let owned = dir.to_path_buf();
+                let fut = tokio::task::spawn_blocking(move || {
+                    let access = probe(owned);
+                    (Instant::now(), access)
+                })
+                .map(|joined| joined.unwrap_or_else(|_| (Instant::now(), DirAccess::Error)))
+                .boxed()
+                .shared();
+                *slot = Some((dir.to_path_buf(), fut.clone()));
+                fut
+            })
+        };
+        match tokio::time::timeout(self.wait, pending).await {
+            Ok((_, access)) => access,
+            Err(_) => DirAccess::TimedOut,
+        }
+    }
 }
 
 impl ControlContext {
@@ -99,6 +259,8 @@ impl ControlContext {
                     })
                     .collect();
                 let paired_devices = self.auth.lock().await.paired_devices().len();
+                let (screen_recording, accessibility) = host_grants();
+                let upload_dir_access = probe_upload_dir(&self.upload_dir).await;
                 Response {
                     ok: true,
                     status: Some(Status {
@@ -110,6 +272,10 @@ impl ControlContext {
                         displays,
                         paired_devices,
                         audio: self.audio,
+                        screen_recording,
+                        accessibility,
+                        upload_dir: Some(self.upload_dir.display().to_string()),
+                        upload_dir_access: Some(upload_dir_access),
                     }),
                     ..Default::default()
                 }
@@ -429,6 +595,7 @@ mod tests {
             device_id: "pc".into(),
             transports: vec!["webrtc".into()],
             audio: false,
+            upload_dir: dir.clone(),
         };
         for (req, check) in [
             ("{\"cmd\":\"pair\"}\n", "code"),
@@ -452,10 +619,163 @@ mod tests {
                     let st = resp.status.unwrap();
                     assert_eq!((st.controllers, st.max_controllers), (0, 2));
                     assert_eq!(st.displays, vec!["* Display 1 (1920x1080)"]);
+                    assert_eq!(st.upload_dir_access, Some(DirAccess::Ok));
+                    assert_eq!(st.upload_dir, Some(dir.display().to_string()));
+                    assert_eq!(st.screen_recording.is_some(), cfg!(target_os = "macos"));
+                    assert_eq!(st.accessibility.is_some(), cfg!(target_os = "macos"));
                 }
                 _ => assert!(!resp.ok && resp.error.is_some()),
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A probe that counts its runs and blocks until `release` says go.
+    fn gated_probe(
+        runs: &Arc<std::sync::atomic::AtomicUsize>,
+        release: &Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        result: DirAccess,
+    ) -> impl FnOnce(PathBuf) -> DirAccess + Send + 'static {
+        let (runs, release) = (Arc::clone(runs), Arc::clone(release));
+        move |_| {
+            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = release.lock().unwrap().recv();
+            result
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_probe_is_shared_not_repeated() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = ProbeCache::new(Duration::from_secs(60), Duration::from_millis(50));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (go, gate) = std::sync::mpsc::channel();
+        let gate = Arc::new(std::sync::Mutex::new(gate));
+        let dir = Path::new("/nonexistent/Downloads");
+
+        // A probe stuck on a privacy prompt: each status request times out
+        // after `wait`, but they all wait on the one probe — no new blocking
+        // thread per request.
+        for _ in 0..3 {
+            let got = cache
+                .get(dir, gated_probe(&runs, &gate, DirAccess::Ok))
+                .await;
+            assert_eq!(got, DirAccess::TimedOut);
+        }
+        let concurrent = futures_util::future::join_all(
+            (0..3).map(|_| cache.get(dir, gated_probe(&runs, &gate, DirAccess::Ok))),
+        )
+        .await;
+        assert_eq!(concurrent, vec![DirAccess::TimedOut; 3]);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // The prompt is answered: the next request gets the probe's result
+        // (even though nobody was waiting when it finished)...
+        go.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let got = cache
+            .get(dir, gated_probe(&runs, &gate, DirAccess::Denied))
+            .await;
+        assert_eq!(got, DirAccess::Ok);
+        // ...and within the TTL it's served from the cache, probe-free.
+        for _ in 0..3 {
+            let got = cache
+                .get(dir, gated_probe(&runs, &gate, DirAccess::Denied))
+                .await;
+            assert_eq!(got, DirAccess::Ok);
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn probe_results_expire_and_are_per_directory() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (go, gate) = std::sync::mpsc::channel();
+        let gate = Arc::new(std::sync::Mutex::new(gate));
+        for _ in 0..8 {
+            go.send(()).unwrap(); // these probes don't block
+        }
+        let (a, b) = (Path::new("/tmp/a"), Path::new("/tmp/b"));
+
+        // TTL zero: every request probes afresh
+        let fresh = ProbeCache::new(Duration::ZERO, Duration::from_secs(5));
+        assert_eq!(
+            fresh.get(a, gated_probe(&runs, &gate, DirAccess::Ok)).await,
+            DirAccess::Ok
+        );
+        assert_eq!(
+            fresh
+                .get(a, gated_probe(&runs, &gate, DirAccess::Denied))
+                .await,
+            DirAccess::Denied
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+
+        // a different directory is never answered from another's result
+        let cache = ProbeCache::new(Duration::from_secs(60), Duration::from_secs(5));
+        assert_eq!(
+            cache.get(a, gated_probe(&runs, &gate, DirAccess::Ok)).await,
+            DirAccess::Ok
+        );
+        assert_eq!(
+            cache
+                .get(b, gated_probe(&runs, &gate, DirAccess::Missing))
+                .await,
+            DirAccess::Missing
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn status_grants_are_optional_on_the_wire() {
+        // A daemon from before the grant fields: the new CLI still parses it.
+        let old = r#"{"ok":true,"status":{"version":"0.1.0","device_id":"mac","transports":[],"controllers":0,"max_controllers":1,"displays":[],"paired_devices":0,"audio":false}}"#;
+        let resp: Response = serde_json::from_str(old).unwrap();
+        let st = resp.status.unwrap();
+        assert_eq!(
+            (st.screen_recording, st.accessibility, st.upload_dir_access),
+            (None, None, None)
+        );
+        assert!(st.permission_lines().is_empty());
+        // ...and a status without them serializes exactly as it used to.
+        assert_eq!(
+            serde_json::to_string(&Status::default()).unwrap(),
+            r#"{"version":"","device_id":"","transports":[],"controllers":0,"max_controllers":0,"displays":[],"paired_devices":0,"audio":false}"#
+        );
+
+        let new = Status {
+            screen_recording: Some(true),
+            accessibility: Some(false),
+            upload_dir: Some("/home/me/Downloads".into()),
+            upload_dir_access: Some(DirAccess::Denied),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert!(
+            json.ends_with(
+                r#""screen_recording":true,"accessibility":false,"upload_dir":"/home/me/Downloads","upload_dir_access":"denied"}"#
+            ),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<Status>(&json).unwrap(), new);
+        // An older CLI's view of a newer daemon: unknown fields are ignored.
+        #[derive(Deserialize)]
+        struct OldStatus {
+            version: String,
+            audio: bool,
+        }
+        let old_view: OldStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!((old_view.version.as_str(), old_view.audio), ("", false));
+
+        let lines = new.permission_lines();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "  permission  Screen Recording: granted");
+        assert!(lines[1].starts_with("  permission  Accessibility: NOT granted"));
+        assert!(
+            lines[2].starts_with("  uploads     /home/me/Downloads: NO ACCESS — uploads will fail"),
+            "{}",
+            lines[2]
+        );
     }
 }

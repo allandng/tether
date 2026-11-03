@@ -15,7 +15,8 @@ use crate::session;
 
 /// Device-pairing enforcement policy (Phase 5). The gate activates once any
 /// device is paired or `require_pairing` is set, so a host that has admitted a
-/// device can't also be reached over the old unauthenticated path.
+/// device can't also be reached over the old unauthenticated path — and while
+/// a pairing code is armed, so the controller is asked for it.
 /// `allow_unpaired` is an explicit dev/LAN escape that keeps the gate off.
 #[derive(Clone, Copy, Debug)]
 pub struct AuthPolicy {

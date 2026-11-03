@@ -3,7 +3,7 @@
 
 import type { PasteFlow } from "./clipboard";
 import { GestureMachine, type GestureSink, type Mode } from "./gestures";
-import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, type InputEvent } from "./protocol";
+import { MOD_ALT, MOD_CAPS_LOCK, MOD_CAPS_LOCK_KNOWN, MOD_CTRL, MOD_META, MOD_SHIFT, type InputEvent } from "./protocol";
 import type { Viewer } from "./viewer";
 
 /** Anything input events can be sent through (a transport, or a facade over
@@ -16,6 +16,8 @@ export interface InputSink {
 export interface ZoomSink {
   applyZoom(scale: number, focalX: number, focalY: number): void;
   endZoom(): void;
+  /** Trackpad edge auto-pan; returns the shift actually applied. */
+  panBy(dx: number, dy: number): { dx: number; dy: number };
 }
 
 export interface NormalizedPoint {
@@ -44,12 +46,24 @@ export function normalizedFromClient(clientX: number, clientY: number, rect: Rec
   };
 }
 
-export function modifierMask(e: { shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean }): number {
+export function modifierMask(e: {
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  getModifierState?(key: string): boolean;
+}): number {
+  // Caps Lock travels as a lock *state* (the host syncs its own lock to it),
+  // flagged KNOWN so hosts can tell "off" from "not reported".
+  const caps = e.getModifierState
+    ? MOD_CAPS_LOCK_KNOWN | (e.getModifierState("CapsLock") ? MOD_CAPS_LOCK : 0)
+    : 0;
   return (
     (e.shiftKey ? MOD_SHIFT : 0) |
     (e.ctrlKey ? MOD_CTRL : 0) |
     (e.altKey ? MOD_ALT : 0) |
-    (e.metaKey ? MOD_META : 0)
+    (e.metaKey ? MOD_META : 0) |
+    caps
   );
 }
 
@@ -66,6 +80,10 @@ export interface InputOptions {
   zoomSink?: ZoomSink;
   /** Touch pointer mode; defaults to "touch" (absolute). */
   touchMode?: Mode;
+  /** Asked on every pointerdown; false leaves focus where it is. While the
+   * soft keyboard is open its field must keep focus — focusing the canvas
+   * would dismiss it. Defaults to always focusing the canvas. */
+  shouldFocusCanvas?: () => boolean;
 }
 
 export function attachInput(
@@ -73,7 +91,7 @@ export function attachInput(
   viewer: Viewer,
   connection: InputSink,
   options: InputOptions = {},
-): { setMode(mode: Mode): void; cancelGesture(): void } {
+): { setMode(mode: Mode): void; cancelGesture(): void; relayout(): void } {
   const { pasteFlow, zoomSink } = options;
   const point = (e: { clientX: number; clientY: number }) =>
     normalizedFromClient(e.clientX, e.clientY, viewer.displayedRect());
@@ -108,11 +126,13 @@ export function attachInput(
     scroll: (dx, dy) => connection.sendInput({ type: "input", kind: "scroll", dx, dy }),
     zoom: (scale, fx, fy) => zoomSink?.applyZoom(scale, fx, fy),
     zoomEnd: () => zoomSink?.endZoom(),
+    pan: (dx, dy) => zoomSink?.panBy(dx, dy) ?? { dx: 0, dy: 0 },
   };
 
   const gestures = new GestureMachine(sink, {
     mode: options.touchMode ?? "touch",
     bounds: viewer.displayedRect(),
+    visible: viewer.visibleRect(),
   });
 
   // The machine returns its single pending deadline (long-press); schedule one
@@ -144,9 +164,9 @@ export function attachInput(
   });
 
   canvas.addEventListener("pointerdown", (e) => {
-    canvas.focus();
+    if (options.shouldFocusCanvas?.() ?? true) canvas.focus();
     if (isTouch(e)) {
-      gestures.setBounds(viewer.displayedRect());
+      gestures.setBounds(viewer.displayedRect(), viewer.visibleRect());
       try {
         canvas.setPointerCapture(e.pointerId);
       } catch {
@@ -182,6 +202,20 @@ export function attachInput(
   canvas.addEventListener("pointercancel", (e) => {
     if (isTouch(e)) schedule(gestures.onCancel(e.pointerId));
   });
+
+  // iOS WebKit synthesizes a tap's mouse events from its own tap recognizer,
+  // which preventDefault on pointerdown doesn't stop: the mousedown moves
+  // focus to the canvas, blurring the soft keyboard's field — so every tap on
+  // the screen dismissed the keyboard. Cancelling the touch cancels the tap.
+  // Gestures run on pointer events, which still fire; canvas focus is taken
+  // in pointerdown (shouldFocusCanvas) where wanted.
+  canvas.addEventListener(
+    "touchend",
+    (e) => {
+      if (e.cancelable) e.preventDefault();
+    },
+    { passive: false },
+  );
 
   // The host gets the right-click; don't also open the local menu.
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -259,6 +293,16 @@ export function attachInput(
       }
       gestures.reset();
       viewer.hideCursor();
+    },
+    /** The view's geometry changed (rotation, resize, zoom reset): re-fit
+     * the trackpad cursor — same content point, clamped to what's visible —
+     * and its dot. Call after viewer.relayout(). */
+    relayout: () => {
+      gestures.setBounds(viewer.displayedRect(), viewer.visibleRect());
+      if (currentMode === "trackpad" && viewer.cursorVisible) {
+        const c = gestures.cursor;
+        viewer.setCursor(c.x, c.y);
+      }
     },
   };
 }

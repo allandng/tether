@@ -15,6 +15,16 @@ reassembly to a valid JPEG, and input round-trip.
 | Wrong secret / non-host target refused at signaling | **PASS** | Live: bad secret → refused, closed, never connects (and retry keeps failing). Integration tests: `bad_auth` close, `target_not_host`, `unknown_target`, `not_registered`. |
 | H.264 ≤ 3 Mbps at usable quality, hardware decode | **PASS (encode + bandwidth); decode caveat** | Live native-res measurement: **28.7 fps, 2.54 Mbps** at the 2500 kbps target, 31.8 ms hardware encode (~50× less bandwidth than JPEG). Decoded and rendered in the browser via WebCodecs at 29 fps. Caveat: the preview browser has no GPU, so decode ran in software at ~260 ms latency, bounded by the keyframe-resync backlog guard. Real Safari/Chrome hardware-decode — confirm on the iPad. |
 
+> **Note (2026-11-03):** the 31.8 ms hardware-encode figure above is
+> superseded. Phase 12 hands ScreenCaptureKit's IOSurface buffers to
+> VideoToolbox without a copy. At the same 3420×2214, capture → encoded
+> averages 17.8–18.3 ms (p95 22.2 ms) at 1.1–3.9% CPU. See
+> [phase12-gate-results.md](phase12-gate-results.md#zero-copy-capture--encode).
+>
+> Phase 12 also found that VideoToolbox's SPS made Chrome's decoder buffer
+> 6 frames (~200 ms). The SPS is now rewritten to declare no reordering
+> (decode → output ~3 ms).
+
 ## Bonus verified behavior (not in the gate, load-bearing for the product)
 
 - **Connect to a dark Mac**: tetherd starts and registers while the display

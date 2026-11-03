@@ -440,6 +440,23 @@ async fn answer_offer(
     // (auth failure / ctl never opens) makes the other pumps bail.
     let (authed_tx, authed_rx) = watch::channel(false);
     let audio_authed = authed_rx.clone();
+
+    // A controller that goes away (tab closed, Back, network gone) leaves no
+    // trace on the ctl channel — its close never reaches us — only in the
+    // peer connection failing once ICE gives up. Without this the session
+    // would hold its controller slot (shared with LAN) until the next offer
+    // or a restart.
+    let (gone_tx, gone_rx) = watch::channel(false);
+    pc.on_peer_connection_state_change(Box::new(move |s| {
+        if matches!(
+            s,
+            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+        ) {
+            let _ = gone_tx.send(true);
+        }
+        Box::pin(async {})
+    }));
+
     {
         let state = state.clone();
         let pc_for_dc = Arc::clone(&pc);
@@ -454,12 +471,18 @@ async fn answer_offer(
             let ctl_authed_tx = authed_tx.take(); // moved to the (single) ctl channel
             let ctl_shutdown = ctl_shutdown.take();
             let authed_rx = authed_rx.clone();
+            let gone = gone_rx.clone();
             Box::pin(async move {
                 debug!(label = %dc.label(), "data channel announced");
                 match dc.label() {
-                    "tether-ctl" => {
-                        wire_ctl_channel(dc, state, pc_for_dc.clone(), ctl_authed_tx, ctl_shutdown)
-                    }
+                    "tether-ctl" => wire_ctl_channel(
+                        dc,
+                        state,
+                        pc_for_dc.clone(),
+                        ctl_authed_tx,
+                        ctl_shutdown,
+                        gone,
+                    ),
                     "tether-media" => wire_media_channel(dc, state.clone(), authed_rx),
                     "tether-bulk" => wire_bulk_channel(dc, state, authed_rx, peer),
                     other => debug!(label = %other, "ignoring unexpected data channel"),
@@ -646,6 +669,7 @@ fn wire_ctl_channel(
     pc: Arc<RTCPeerConnection>,
     authed_tx: Option<watch::Sender<bool>>,
     shutdown: Option<watch::Receiver<bool>>,
+    gone: watch::Receiver<bool>,
 ) {
     let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(256);
     dc.on_message(Box::new(move |msg| {
@@ -748,12 +772,19 @@ fn wire_ctl_channel(
         }
         info!("webrtc controller connected");
 
+        let mut gone = Some(gone);
         loop {
             tokio::select! {
                 // replaced/torn down → exit so the permit drops (closing the pc
                 // alone won't end this task; see ActivePeer::shutdown_tx)
                 _ = wait_shutdown(&mut shutdown) => {
                     info!("webrtc controller session ended (replaced/teardown)");
+                    break;
+                }
+                // the controller vanished: free its slot and the pc's pumps
+                _ = wait_shutdown(&mut gone) => {
+                    info!("webrtc controller gone (peer connection failed or closed)");
+                    let _ = pc.close().await;
                     break;
                 }
                 changed = resolution.changed() => {

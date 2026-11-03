@@ -50,6 +50,10 @@ export const MOD_SHIFT = 0b0001;
 export const MOD_CTRL = 0b0010;
 export const MOD_ALT = 0b0100;
 export const MOD_META = 0b1000;
+/** Caps Lock is on (a lock state, not a held key); only with MOD_CAPS_LOCK_KNOWN. */
+export const MOD_CAPS_LOCK = 0b1_0000;
+/** The lock state was sampled for this event, so MOD_CAPS_LOCK is authoritative. */
+export const MOD_CAPS_LOCK_KNOWN = 0b10_0000;
 
 const enum MsgType {
   Hello = 0x01,

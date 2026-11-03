@@ -24,14 +24,27 @@ Phases 6–11 close that gap.
 Order: 6 → 7 → 8 → 9, then 10 and 11 in either order. Phase 6 is genuinely
 blocking. Phases 10 and 11 are features you can ship without.
 
-**Status (Phases 7–11 landed):** every phase has a gate-results doc
+**Status (Phases 7–12 landed):** every phase has a gate-results doc
 ([7](phase7-gate-results.md), [8](phase8-gate-results.md),
 [9](phase9-gate-results.md), [10](phase10-gate-results.md),
-[11](phase11-gate-results.md)). What remains is verification that needs
-hardware or money rather than code: phone/iPad and installed-PWA passes, a live
-WAN + TURN run, a run of the new code on a real Mac (it builds clean in macOS
-CI), the macOS system-audio capturer,
-and Apple/Windows code-signing identities.
+[11](phase11-gate-results.md), [12](phase12-gate-results.md)).
+
+Phase 12 (macOS + iOS completion, [plan](phase12-plan.md)) closed the two
+platform gaps that 7–11 left:
+
+- **macOS audio:** the system-audio capturer is built.
+- **macOS host:** it has run hands-on on a real Mac. Capture, zero-copy
+  encode, audio and input were measured on an M3. A live end-to-end run with a
+  browser controller then found and fixed five bugs.
+- **iPhone/iPad:** the controller was reworked for iPhone/iPad and verified in
+  the iOS Simulator.
+
+What remains is verification that needs hardware or money rather than code:
+
+- real-phone/iPad and installed-PWA passes;
+- a live WAN + TURN run;
+- installing the macOS `.pkg` under launchd;
+- Apple/Windows code-signing identities.
 
 ## What already exists that these phases build on
 
@@ -88,11 +101,24 @@ decide before building it — not after.
 Items that are code-complete but unverifiable on the single-Mac development
 machine, from the phase gate docs:
 
+**Network:**
+
 - A real two-device WAN run (Phase 2 onward).
 - Live TURN relay traversal through a symmetric NAT (Phase 5).
+
+**Hardware, packaging and CI:**
+
 - Multi-display switching on genuine multi-monitor hardware (Phase 5b).
-- An iPad/phone pass to tune the gesture constants, which are educated defaults
-  verified only against synthetic touch events (Phase 4).
+  Discharged for Windows in Phase 7. Still open on a Mac, together with
+  display hot-unplug and a real display-mode change (Phase 12).
+- A real iPhone/iPad pass (Phases 4, 8, 12). Phase 12 verified the controller
+  in the iOS Simulator. What's left needs fingers and a device: tuning the
+  gesture constants, haptics, autocorrect on a real keyboard, Add to Home
+  Screen, and the wake lock in standalone mode.
+- Installing the macOS `.pkg` and answering its launchd-context permission
+  prompts (Phases 9, 12).
+- Windows CI confirming Phase 12's cross-platform `RawFrame` change, which
+  could not be compiled for Windows on the Mac.
 
 Phase 6 deploys the infrastructure that finally makes the first two testable,
 and should discharge them as part of its gate.

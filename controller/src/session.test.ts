@@ -112,6 +112,27 @@ describe("ProtocolSession auth flow", () => {
     expect(session.connected).toBe(false);
   });
 
+  it("a stalled handshake times out, but the pairing prompt waits for the human", () => {
+    vi.useFakeTimers();
+    try {
+      const stalled = makeSession(null);
+      stalled.session.start();
+      vi.advanceTimersByTime(10_001);
+      expect(stalled.events.onProtocolError).toHaveBeenCalledWith("handshake timed out");
+
+      // The user may leave the app to read the code off the host (and iOS may
+      // freeze the page meanwhile): the prompt must still be live on return.
+      const { session, events } = makeSession(null);
+      session.start();
+      session.onMessage(hostHello());
+      session.onMessage(authResult(false));
+      vi.advanceTimersByTime(120_000);
+      expect(events.onProtocolError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a non-Hello first message", () => {
     const { session, events } = makeSession();
     session.start();

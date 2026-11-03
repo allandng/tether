@@ -133,8 +133,43 @@ the mapping to platform virtual key codes. Modifier keys (ShiftLeft, MetaRight,
 …) travel as ordinary KeyDown/KeyUp events; combos work because the host holds
 the modifier key down for as long as the controller does.
 
-**modifiers** bitmask (informational; redundant with modifier key events):
-bit 0 shift, bit 1 ctrl, bit 2 alt/option, bit 3 meta/cmd.
+**modifiers** bitmask. Bits 0-3 are informational (redundant with modifier
+key events): bit 0 shift, bit 1 ctrl, bit 2 alt/option, bit 3 meta/cmd.
+Bits 4-5 carry the controller's Caps Lock *state* (a lock, not a held key):
+
+- bit 4 `CAPS_LOCK` — Caps Lock is on at the controller.
+- bit 5 `CAPS_LOCK_KNOWN` — the sender sampled its lock state for this event
+  (browser: `KeyboardEvent.getModifierState("CapsLock")`), so bit 4 is
+  authoritative. When clear, bit 4 means nothing and hosts don't sync their
+  lock state from it — events without it (older controllers, synthetic
+  key-ups such as the blur release) must not read as "Caps Lock off". (A
+  `CapsLock` *key* event without it is still a press; see below.)
+
+A host that honours the lock bits syncs its own Caps Lock state to bit 4
+whenever bit 5 is set and the two differ, and does not also inject the
+`CapsLock` key event (that would toggle twice). The `CapsLock` key event is
+still sent, so hosts that don't read the lock bits keep their old behaviour.
+
+The reverse case — a *sender* that predates the lock bits (an old or cached
+controller build) talking to a host that reads them — is the host's job: a
+`CapsLock` key event **without** bit 5 is that sender's press and must still
+change the lock. The Windows host injects the key as it always has. The
+macOS host can't (a synthetic Caps Lock key doesn't toggle the lock), so it
+toggles its HID lock state instead, once per press. Browsers disagree on
+what a press sends — Windows/Linux/ChromeOS: keydown + keyup (plus
+auto-repeat keydowns while held); macOS: a keydown when the lock turns on and
+only a keyup when it turns off — and the sender's OS isn't on the wire, so
+the macOS host applies one rule to both: a keydown toggles unless one is
+already outstanding (auto-repeat); a keyup toggles unless it closes an
+outstanding keydown that auto-repeated or is under 500 ms old (the release
+half of a press). The residual ambiguity — a Mac user turning the lock on and
+off again within 500 ms, or a held key that hasn't started repeating after
+500 ms — can leave the two lock states inverted until the next press, which
+is why current senders set bit 5.
+
+Bits 6-7 are reserved: senders write 0 and receivers ignore them. Hosts must
+ignore modifier bits they don't understand — which is what makes adding bits
+here backwards compatible without a version bump.
 
 ### 0x05 — ClipboardData (both directions)
 

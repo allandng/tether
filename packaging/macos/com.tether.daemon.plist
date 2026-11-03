@@ -10,6 +10,9 @@
   This is a template: launchd does not expand ~, so postinstall replaces
   __HOME__ with the user's home when it writes their copy. Logs go to
   ~/Library/Logs/Tether/tetherd.log (per user, not shared /tmp).
+  Restart policy: only after a failure (a clean exit — `launchctl kill TERM`,
+  logout — stays down), and at most every 30 s, so a start-up failure such
+  as a missing permission is a slow retry, not a 10-second crash loop.
 -->
 <plist version="1.0">
 <dict>
@@ -19,7 +22,11 @@
     <string>/usr/local/bin/tetherd</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>30</integer>
   <key>ProcessType</key><string>Interactive</string>
   <key>EnvironmentVariables</key>
   <dict>

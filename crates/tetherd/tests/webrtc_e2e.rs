@@ -54,13 +54,7 @@ impl ScreenCapturer for SyntheticCapturer {
                 bgra[o + 2] = 64;
             }
         }
-        Ok(RawFrame {
-            width: 640,
-            height: 400,
-            bytes_per_row: w * 4,
-            bgra,
-            timestamp_micros: 1,
-        })
+        Ok(RawFrame::from_bgra(640, 400, w * 4, bgra, 1))
     }
 }
 
@@ -86,6 +80,7 @@ async fn webrtc_end_to_end_frames_and_input() {
     let (input_tx, mut input_rx) = mpsc::channel(64);
     let (clipboard_out_tx, clipboard_out_rx) = tokio::sync::watch::channel(None);
     let (clipboard_in_tx, clipboard_in_rx) = std::sync::mpsc::channel::<String>();
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
     let state = ServerState {
         resolution: pipeline.resolution,
         frames: pipeline.frames,
@@ -105,7 +100,7 @@ async fn webrtc_end_to_end_frames_and_input() {
         },
         bitrate: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         bitrate_ceiling_kbps: 4000,
-        controller_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+        controller_slots: Arc::clone(&slots),
         displays: pipeline.displays,
         select_display: pipeline.select_display,
         host_name: "test-host".into(),
@@ -443,5 +438,20 @@ async fn webrtc_end_to_end_frames_and_input() {
     .expect("host clipboard never arrived on bulk");
     assert_eq!(got, big_down);
 
+    // The controller leaves without any goodbye on ctl: the host must notice
+    // the peer connection ending and give the controller slot back.
+    assert_eq!(slots.available_permits(), 0, "session holds the slot");
+    let left = std::time::Instant::now();
     pc.close().await.ok();
+    tokio::time::timeout(Duration::from_secs(45), async {
+        while slots.available_permits() == 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("controller slot never released after the peer left");
+    eprintln!(
+        "slot released {:?} after the controller closed",
+        left.elapsed()
+    );
 }
