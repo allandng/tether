@@ -134,12 +134,22 @@ impl MouseButton {
 }
 
 /// Modifier bitmask carried on key events. Modifier keys also arrive as their
-/// own KeyDown/KeyUp events; the mask is informational/diagnostic.
+/// own KeyDown/KeyUp events; bits 0-3 are informational/diagnostic. Bits 4-5
+/// carry the controller's Caps Lock *state* (a lock, not a held key). Bits 6-7
+/// are reserved: senders write 0, receivers ignore them.
 pub mod modifiers {
     pub const SHIFT: u8 = 0b0001;
     pub const CTRL: u8 = 0b0010;
     pub const ALT: u8 = 0b0100;
     pub const META: u8 = 0b1000;
+    /// Caps Lock is on at the controller. Only meaningful with
+    /// [`CAPS_LOCK_KNOWN`]; hosts sync their lock state to it.
+    pub const CAPS_LOCK: u8 = 0b0001_0000;
+    /// The sender sampled its lock state for this event, so [`CAPS_LOCK`] is
+    /// authoritative. Without it (older controllers, synthetic key-ups) hosts
+    /// must leave their Caps Lock state alone — a bare 0 bit 4 is "unknown",
+    /// not "off".
+    pub const CAPS_LOCK_KNOWN: u8 = 0b0010_0000;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1064,6 +1074,12 @@ mod tests {
             Message::InputEvent(InputEvent::KeyDown {
                 code: "KeyA".into(),
                 modifiers: modifiers::SHIFT | modifiers::META,
+            }),
+            // Lock-state bits, and reserved bits 6-7, pass through untouched
+            // (decoders never reject unknown modifier bits).
+            Message::InputEvent(InputEvent::KeyDown {
+                code: "KeyB".into(),
+                modifiers: modifiers::CAPS_LOCK | modifiers::CAPS_LOCK_KNOWN | 0b1100_0000,
             }),
             Message::InputEvent(InputEvent::KeyUp {
                 code: "MetaLeft".into(),
