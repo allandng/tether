@@ -149,4 +149,4 @@ host can log why audio is absent rather than leaving it a mystery.
 
 ---
 
-**Status: done (Windows half; the macOS capturer is still open) — see [phase10-gate-results.md](phase10-gate-results.md).**
+**Status: done. Windows in this phase, the macOS capturer in Phase 12. See [phase10-gate-results.md](phase10-gate-results.md).**
